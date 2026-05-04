@@ -16,3 +16,8 @@ frontend/.env
 # System
 .DS_Store
 Thumbs.db
+
+# Diagnostic / test artifacts
+backend/test_*.py
+backend/e2e_diagnostic.py
+backend/*.wav

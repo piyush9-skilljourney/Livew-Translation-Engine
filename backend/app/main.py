@@ -1,10 +1,16 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
+from app.services.sarvam import sarvam_service
+import asyncio
+import base64
+import json
+import io
+import wave
+import struct
 
 app = FastAPI(title=settings.PROJECT_NAME)
 
-# Set specific origins for security and compatibility
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
@@ -20,6 +26,158 @@ app.add_middleware(
 
 from app.api.endpoints import router as translation_router
 app.include_router(translation_router, prefix="/api/v1")
+
+active_listeners = set()
+
+
+def pcm_chunks_to_wav_b64(chunks: list[bytes], sample_rate: int = 16000) -> str:
+    """Combine all raw PCM chunks into one complete WAV file and return as base64."""
+    wav_io = io.BytesIO()
+    with wave.open(wav_io, 'wb') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)     # 16-bit PCM
+        wf.setframerate(sample_rate)
+        for chunk in chunks:
+            wf.writeframes(chunk)
+    return base64.b64encode(wav_io.getvalue()).decode('utf-8')
+
+
+# ──────────────────────────────────────────────
+# LISTENER ENDPOINT
+# ──────────────────────────────────────────────
+@app.websocket("/ws/listener")
+async def websocket_listener(websocket: WebSocket):
+    await websocket.accept()
+    active_listeners.add(websocket)
+    print(f"👥 Listener Joined. Total: {len(active_listeners)}", flush=True)
+    try:
+        while True:
+            await websocket.receive()
+    except WebSocketDisconnect:
+        active_listeners.discard(websocket)
+        print("🔌 Listener Disconnected", flush=True)
+    except Exception as e:
+        active_listeners.discard(websocket)
+        print(f"❌ Listener Error: {e}", flush=True)
+
+
+# ──────────────────────────────────────────────
+# HELPER: translate + TTS + broadcast
+# ──────────────────────────────────────────────
+async def broadcast_translation(text: str, loop: asyncio.AbstractEventLoop):
+    if not text.strip():
+        return
+    try:
+        translated = await loop.run_in_executor(
+            None, lambda: sarvam_service.translate(text, target_language="mr-IN")
+        )
+        if not translated:
+            print("⚠️ Translation returned empty.", flush=True)
+            return
+        print(f"✅ Translated: {translated}", flush=True)
+
+        audio_b64 = await loop.run_in_executor(
+            None, lambda: sarvam_service.text_to_speech(translated, target_language="mr-IN")
+        )
+        if not audio_b64:
+            print("⚠️ TTS returned empty.", flush=True)
+            return
+
+        print(f"🔊 Broadcasting to {len(active_listeners)} listener(s).", flush=True)
+        broadcast_msg = {"type": "audio", "audio": audio_b64, "text": translated}
+
+        dead = set()
+        for listener in list(active_listeners):
+            try:
+                await listener.send_json(broadcast_msg)
+            except Exception:
+                dead.add(listener)
+        active_listeners.difference_update(dead)
+
+    except Exception as e:
+        print(f"❌ Broadcast Error: {e}", flush=True)
+
+
+# ──────────────────────────────────────────────
+# SPEAKER ENDPOINT
+# ──────────────────────────────────────────────
+@app.websocket("/ws/speaker")
+async def websocket_speaker(websocket: WebSocket):
+    await websocket.accept()
+    print("🎤 Speaker Connected", flush=True)
+    loop = asyncio.get_event_loop()
+
+    try:
+        while True:
+            # ── Wait for first PCM chunk (microphone button pressed) ──
+            message = await websocket.receive()
+            if message.get("bytes") is None:
+                continue
+
+            print("🎤 Speaker pressed button. Collecting audio...", flush=True)
+            pcm_chunks: list[bytes] = []
+            pcm_chunks.append(message["bytes"])
+
+            # ── Inner loop: collect chunks until button released ──
+            while True:
+                inner_msg = await websocket.receive()
+
+                if inner_msg.get("bytes") is not None:
+                    pcm_chunks.append(inner_msg["bytes"])
+                    total = sum(len(c) for c in pcm_chunks)
+                    if len(pcm_chunks) % 4 == 0:
+                        duration_ms = (total // 2) / 16000 * 1000
+                        print(f"📡 Buffered {len(pcm_chunks)} chunks ({duration_ms:.0f}ms)", flush=True)
+
+                elif inner_msg.get("text") is not None:
+                    text_data = json.loads(inner_msg["text"])
+                    if text_data.get("type") == "flush":
+                        total_bytes = sum(len(c) for c in pcm_chunks)
+                        duration_s = (total_bytes // 2) / 16000
+                        print(f"🌊 Button released. {len(pcm_chunks)} chunks, {duration_s:.1f}s of audio.", flush=True)
+                        break
+
+            # ── Transcribe using BATCH STT (streaming API is unreliable) ──
+            print("🧠 Transcribing with Sarvam batch STT...", flush=True)
+            import tempfile, os
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                tmp_path = tmp.name
+                wav_io = io.BytesIO()
+                with wave.open(wav_io, 'wb') as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(16000)
+                    for chunk in pcm_chunks:
+                        wf.writeframes(chunk)
+                tmp.write(wav_io.getvalue())
+
+            try:
+                transcript = await loop.run_in_executor(
+                    None, lambda: sarvam_service.transcribe(tmp_path, language_code="hi-IN")
+                )
+            finally:
+                os.unlink(tmp_path)
+
+            if not transcript:
+                print("⚠️ No transcript from STT. Skipping.", flush=True)
+                continue
+
+            print(f"📥 Transcript: {transcript}", flush=True)
+
+            # Echo transcript to speaker UI
+            try:
+                await websocket.send_json({"type": "transcript", "text": transcript})
+            except Exception:
+                pass
+
+            # Broadcast translation to all listeners
+            asyncio.create_task(broadcast_translation(transcript, loop))
+
+    except WebSocketDisconnect:
+        print("🔌 Speaker Disconnected", flush=True)
+    except Exception as e:
+        print(f"❌ Speaker Global Error: {e}", flush=True)
+
 
 @app.get("/")
 async def root():

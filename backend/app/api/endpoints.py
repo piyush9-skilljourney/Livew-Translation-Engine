@@ -18,12 +18,19 @@ async def translate_audio(file: UploadFile = File(...), target_lang: str = "mr-I
 
         # 1. Transcribe
         print("🎙 Transcribing...")
-        transcript = sarvam_service.transcribe(temp_filename, language_code="hi-IN")
+        transcript_data = sarvam_service.transcribe(temp_filename, language_code="hi-IN")
+        
+        # Ensure we have a string
+        transcript = str(transcript_data) if transcript_data else ""
         print(f"📝 Transcript: {transcript}")
         
-        if not transcript:
+        if not transcript or len(transcript.strip()) < 1:
             print("❌ Transcription returned empty result")
-            raise HTTPException(status_code=500, detail="Transcription failed")
+            return {
+                "original_text": "",
+                "translated_text": "",
+                "audio_base64": ""
+            }
 
         # 2. Translate
         print(f"🌐 Translating to {target_lang}...")

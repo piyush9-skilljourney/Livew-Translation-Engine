@@ -1,30 +1,79 @@
 # Testing Guide: Live Translation Engine
 
-This document provides step-by-step instructions to verify the functionality of each phase of the project.
+## ✅ Current Working Mode: Push-to-Talk Broadcast
+
+### Prerequisites
+1. Backend running: `python -m uvicorn app.main:app --reload` (in `backend/`)
+2. Frontend running: `npm run dev` (in `frontend/`)
+3. Open two browser tabs to `http://localhost:5173/`
 
 ---
 
-## 🧪 Phase 1: Core AI Engine (Walkie-Talkie)
-**Goal:** Verify the base Speech-to-Text -> Translation -> Text-to-Speech pipeline.
+### Test: Basic Push-to-Talk Broadcast
 
-### 1. Prerequisites
-- [ ] Valid `SARVAM_API_KEY` in `backend/.env`.
-- [ ] Backend running on `http://localhost:8000`.
-- [ ] Frontend running on `http://localhost:5173`.
+**Setup:**
+- Tab 1 → Click **"I am a Speaker"**
+- Tab 2 → Click **"I am a Listener"**
 
-### 2. Test Execution
-1.  **Permissions:** Ensure the browser has microphone access.
-2.  **Capture:** Click and **hold** the "Hold to Speak" button.
-3.  **Input:** Speak a simple Hindi phrase (e.g., *"Aaj ka mausam kaisa hai?"*).
-4.  **Process:** Release the button and wait for the "Processing" state to finish.
+**Backend terminal should show:**
+```
+🎤 Speaker Connected
+👥 Listener Joined. Total: 1
+```
 
-### 3. Verification Checklist
-- [ ] **STT:** Does the "Original (Hindi)" text accurately reflect what you said?
-- [ ] **NMT:** Is the "Translated (Marathi)" text a correct translation?
-- [ ] **TTS:** Does the audio play automatically?
-- [ ] **Voice Quality:** Is the Marathi voice clear and natural sounding?
+**Speaking:**
+1. In Tab 1, **hold the microphone button**
+2. Speak clearly in Hindi for **at least 3 seconds**, e.g.:  
+   *"मेरा नाम आदित्य है और मैं एक सॉफ्टवेयर इंजीनियर हूँ"*
+3. **Release the button**
+
+**Backend terminal should show:**
+```
+🎤 Speaker pressed button. Collecting audio...
+📡 Buffered 4 chunks (250ms)
+🌊 Button released. 20 chunks, 5.1s of audio.
+🧠 Transcribing with Sarvam batch STT...
+📥 Transcript: मेरा नाम आदित्य है...
+✅ Translated: माझे नाव आदित्य आहे...
+🔊 Broadcasting to 1 listener(s).
+```
+
+**Expected result:**
+- Tab 2 (Listener) plays the Marathi audio automatically
+- Tab 2 shows the Marathi text subtitle
+- Tab 1 (Speaker) shows the Hindi transcription feedback
 
 ---
 
-## 🧪 Phase 2: Real-time Streaming (Coming Soon)
-*Steps will be added upon implementation.*
+### Test: Multiple Listeners
+
+1. Open 3+ tabs of `http://localhost:5173/`
+2. Tab 1 = Speaker, Tabs 2/3/4 = Listeners
+3. Backend will show `👥 Listener Joined. Total: 3`
+4. All Listener tabs should receive the broadcast simultaneously
+
+---
+
+### Troubleshooting
+
+| Issue | Cause | Fix |
+|---|---|---|
+| No audio in Listener tab | Browser autoplay policy | Click anywhere in the Listener tab first to unlock autoplay |
+| `⚠️ No transcript from STT` | Audio too short or mic too quiet | Hold button for 3+ seconds, speak close to mic |
+| `❌ Broadcast Error` | Listener disconnected | Refresh both tabs |
+| Latency is 5+ seconds | Normal for batch pipeline | Expected — see Phase 3 for live streaming |
+
+---
+
+### Known Limitations (Push-to-Talk Mode)
+- Speaker must hold a button — not hands-free
+- 3–5 second latency per utterance
+- `ScriptProcessorNode` deprecation warning in Chrome (non-breaking)
+- Browser must have microphone permission granted
+
+---
+
+## 🔄 Phase 3 (Coming): True Live Streaming
+- No button required — VAD auto-detects speech
+- Target latency: 1–2 seconds
+- See `implementation_plan.md` for roadmap

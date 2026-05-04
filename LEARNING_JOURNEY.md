@@ -4,143 +4,53 @@ This file is your personal mentor's log. Every concept, every bug, every decisio
 
 ---
 
-## 🎓 Upcoming: Phase 3 Lessons (What You're About To Learn)
+## 🗺️ The Big Picture: Where We Are
 
-### What's Coming & Why It Matters
-
-| Lesson | Concept | Real-World Analogy |
-|---|---|---|
-| L9 | WebSockets vs HTTP — deep dive | Walkie-talkie vs postal mail |
-| L10 | Audio pipelines & sample rates | Why your ears can only hear 20kHz |
-| L11 | Voice Activity Detection (VAD) | How Siri knows when you stopped talking |
-| L12 | Streaming STT vs Batch STT | Live TV captioning vs YouTube captions |
-| L13 | Event loops & `run_in_executor` | Why a chef can't cook and take orders at the same time |
-| L14 | API keys, tokens, and security | The difference between your front door key and a hotel key card |
-| L15 | asyncio Tasks — create_task vs await | Starting a dishwasher while you cook dinner |
-| L16 | Multi-Language Routing | The "Switchboard" operator |
-| L17 | Scalable Broadcasting | Grouping people by their language |
-| L18 | Script Normalization | Pure native script vs Code-mixing |
-| L19 | R&D War Stories | Real-world debugging & Python 3.14 |
+```
+Phase 1 ✅ → Phase 2 ✅ → Phase 3 ✅ → Phase 4 📋
+  │              │              │              │
+Single user    Push-to-Talk   Hands-Free    Production
+batch          + Broadcast    Auto-Segment  Multi-room
+translation    One-to-Many    (Silero VAD)  (LiveKit)
+                9 languages
+```
 
 ---
 
-## 🎓 Lesson 12 (Preview): Streaming STT vs Batch STT
+## 🏛️ Phase 1: Foundations (The Core AI Pipeline)
 
-This is the most important concept for Phase 3. Understanding this gap is what separates us from YouTube Live.
+## 🎓 Lesson 6: Explicit Loading (The "Brute Force" Method)
 
-### The Core Difference
-
-**Batch STT (what we use now):**
-```
-You speak for 5 seconds → STOP → Send audio file → Wait 1.5s → Get transcript
-```
-Like writing an email, sending it, and waiting for a reply.
-
-**Streaming STT (what we are building towards):**
-```
-You speak → 200ms → partial transcript → 200ms → updated transcript → ...
-```
-Like a phone call where the other person hears you in real time.
-
-### Why Sarvam's Streaming API Failed Us
-During our R&D, we discovered that the Sarvam Streaming WebSocket:
-- Accepted our connection ✅
-- Accepted audio data ✅
-- Returned **zero transcripts** ❌ (server-side bug, not our fault)
-
-This is why we use **Deepgram Nova-2** for Phase 3. Their streaming STT returns partial results every ~200ms.
-
-### The Key Parameter: `interim_results`
-```
-interim_results=true → "Give me guesses as I talk"
-interim_results=false → "Wait until I'm done,## Phase 3: Hands-Free Auto-Segmentation (COMPLETE ✅)
-- **Status**: Production Ready
-- **Key Achievements**:
-  - Integrated Silero VAD (Voice Activity Detection) via `@ricky0123/vad-react`.
-  - Implemented automatic speech boundary detection (auto-clipping).
-  - Configured "Public Asset Store" for reliable WASM/ONNX delivery.
-  - Eliminated "Double-Mount" bugs by disabling StrictMode.
-  - Added Mode Toggle (Manual vs Hands-Free) in Speaker Studio.
-
-## Phase 4: Production Polish & Scaling (UP NEXT 🔜)
-- [ ] UI/UX overhaul for "YouTube Live" broadcast feel.
-- [ ] Real-time Transcript scrolling for Listeners.
-- [ ] Network status indicator (Latency tracking).
-- [ ] Support for multiple simultaneous speakers.
-ally knows when you're speaking.
-
-### How VAD Works
-A VAD is a tiny AI model that listens to your microphone 100 times per second and answers one question: **"Is a human speaking right now? Yes or No?"**
-
-```
-🎙 [silence] → VAD: No  → ignore
-🎙 [throat clear] → VAD: No  → ignore  
-🎙 "Hello everyone" → VAD: Yes → START streaming to STT
-🎙 [pause] → VAD: No (for 0.3s) → END stream, finalize transcript
-```
-
-The model we use (`@ricky0123/vad-web`) runs the **Silero VAD** — a 1.8MB neural network compiled to WebAssembly. It runs entirely in your browser, with zero server calls.
-
----
-
-## 🎓 Lesson 13 (Preview): Why Blocking Calls Crash Async Servers
-
-### The Bug We Fixed in Phase 2
-One of the most dangerous bugs we found: `translate()` and `text_to_speech()` are **synchronous** functions inside an **async** server.
-
-### The Restaurant Analogy 🍽️
-Imagine a waiter who is also the only cook.
-
-**BAD (what we had):**
-```
-Waiter takes order → goes to kitchen → cooks the full meal → comes back → takes next order
-While cooking: ALL OTHER CUSTOMERS WAIT. Nobody gets served.
-```
-
-**GOOD (what we fixed):**
-```
-Waiter takes order → hands order to SEPARATE COOK (thread pool) → immediately takes next order
-Cook notifies waiter when meal is ready → waiter delivers it
-```
-
-In code:
+When automatic config loading fails, you load it yourself:
 ```python
-# BAD: blocks the entire server for 2 seconds
-translated = sarvam_service.translate(text)
-
-# GOOD: hands it to a worker thread, server stays responsive
-translated = await loop.run_in_executor(None, lambda: sarvam_service.translate(text))
+from dotenv import load_dotenv
+load_dotenv(dotenv_path="/exact/path/to/.env")
 ```
+This removes all ambiguity about which file Python is reading.
 
-The `run_in_executor` call is like hiring a separate cook. The async event loop (the waiter) stays free to handle other WebSocket connections while the cook works.
+## 🎓 Lesson 7: The "Diagnostic" Mindset
+### 1. When all else fails: Print it!
+If your code says a file "doesn't exist" but you see it with your own eyes, you have a **Perspective Conflict**. You and Python are looking at the world differently.
+
+### 2. Path Awareness
+On Windows, paths can be absolute (`D:\...`) or relative (`./...`). Diagnostic prints like `os.getcwd()` (Get Current Working Directory) help you see the world through Python's eyes.
+
+### 3. "Visibility" is Debugging
+By printing the first few characters of a key (NEVER the whole key!), you can verify it's loaded without compromising security.
+
+## 🎓 Lesson 8: Reading the SDK Map
+### 1. The "Keyword" Problem
+Every library has its own specific names for parameters. Even if "API Key" is common, one library might call it `api_key`, another `token`, and another `api_subscription_key`.
+
+### 2. Tracebacks are your friends
+The error `unexpected keyword argument 'api_key'` told us exactly what was wrong: we used a name the computer didn't recognize.
+
+### 3. Debugging as Research
+When an SDK fails, the first step is always to check the "Constructor" (the `__init__` method) in the documentation to find the exact names it wants.
 
 ---
 
-## 🎓 Lesson 10 (Preview): Audio Pipelines & Sample Rates
-
-### Why 16000Hz?
-Sound is vibration. Digital audio captures those vibrations as numbers. The **sample rate** is how many "snapshots" per second.
-
-| Sample Rate | Use Case |
-|---|---|
-| 8000 Hz | Old telephone quality |
-| **16000 Hz** | **Speech recognition (our pipeline)** |
-| 22050 Hz | Sarvam TTS output |
-| 44100 Hz | CD quality music |
-| 48000 Hz | Professional audio |
-
-**The problem we hit:** The browser records at 44100Hz (hardware default). Sarvam STT requires strictly 16000Hz. If you send 44100Hz audio to a 16000Hz decoder, it hears a voice that sounds like a chipmunk played at 2.75x speed — unrecognizable.
-
-### Our Fix: AudioContext with `sampleRate: 16000`
-```js
-const audioContext = new AudioContext({ sampleRate: 16000 });
-```
-This tells the browser's audio engine: "Resample everything to 16kHz before giving it to me."
-
-### The Python Resampling Problem
-When we generated TTS audio (22050Hz) and tried to feed it into the STT (requires 16000Hz), we needed to resample it in Python. We used `scipy.signal.resample_poly()` because Python 3.13+ removed the `audioop` module that everyone used to use for this.
-
----
+## 📡 Phase 2: Real-time Broadcasting (WebSockets & Async)
 
 ## 🎓 Lesson 9: WebSockets vs HTTP — The Deep Dive
 
@@ -182,85 +92,80 @@ Server:  HTTP/1.1 101 Switching Protocols
 /ws/listener → Listener just waits → server pushes audio when ready
 ```
 
----
+## 🎓 Lesson 10: Audio Pipelines & Sample Rates
 
-## 🎓 Lesson 8: Reading the SDK Map (Phase 1)
-### 1. The "Keyword" Problem
-Every library has its own specific names for parameters. Even if "API Key" is common, one library might call it `api_key`, another `token`, and another `api_subscription_key`.
+### Why 16000Hz?
+Sound is vibration. Digital audio captures those vibrations as numbers. The **sample rate** is how many "snapshots" per second.
 
-### 2. Tracebacks are your friends
-The error `unexpected keyword argument 'api_key'` told us exactly what was wrong: we used a name the computer didn't recognize.
+| Sample Rate | Use Case |
+|---|---|
+| 8000 Hz | Old telephone quality |
+| **16000 Hz** | **Speech recognition (our pipeline)** |
+| 22050 Hz | Sarvam TTS output |
+| 44100 Hz | CD quality music |
+| 48000 Hz | Professional audio |
 
-### 3. Debugging as Research
-When an SDK fails, the first step is always to check the "Constructor" (the `__init__` method) in the documentation to find the exact names it wants.
+**The problem we hit:** The browser records at 44100Hz (hardware default). Sarvam STT requires strictly 16000Hz. If you send 44100Hz audio to a 16000Hz decoder, it hears a voice that sounds like a chipmunk played at 2.75x speed — unrecognizable.
 
----
-
-## 🎓 Lesson 7: The "Diagnostic" Mindset (Phase 1)
-### 1. When all else fails: Print it!
-If your code says a file "doesn't exist" but you see it with your own eyes, you have a **Perspective Conflict**. You and Python are looking at the world differently.
-
-### 2. Path Awareness
-On Windows, paths can be absolute (`D:\...`) or relative (`./...`). Diagnostic prints like `os.getcwd()` (Get Current Working Directory) help you see the world through Python's eyes.
-
-### 3. "Visibility" is Debugging
-By printing the first few characters of a key (NEVER the whole key!), you can verify it's loaded without compromising security.
-
----
-
-## 🎓 Lesson 6: Explicit Loading (The "Brute Force" Method) (Phase 1)
-
-When automatic config loading fails, you load it yourself:
-```python
-from dotenv import load_dotenv
-load_dotenv(dotenv_path="/exact/path/to/.env")
+### Our Fix: AudioContext with `sampleRate: 16000`
+```js
+const audioContext = new AudioContext({ sampleRate: 16000 });
 ```
-This removes all ambiguity about which file Python is reading.
+This tells the browser's audio engine: "Resample everything to 16kHz before giving it to me."
 
----
+## 🎓 Lesson 13: Why Blocking Calls Crash Async Servers
 
-## 🎓 Phase 2 R&D Lessons: What We Discovered the Hard Way
+### The Bug We Fixed in Phase 2
+One of the most dangerous bugs we found: `translate()` and `text_to_speech()` are **synchronous** functions inside an **async** server.
 
-### The Async/Sync Trap
-**You will hit this constantly as a backend developer.** The rule is simple:
+### The Restaurant Analogy 🍽️
+Imagine a waiter who is also the only cook.
 
-> If you are inside an `async def` function, every slow operation must be `await`-ed or offloaded to a thread pool. NEVER call a blocking function directly.
-
-Signs you've made this mistake:
-- Your server handles one request, then goes silent
-- All other users can't connect while one user is being served
-- FastAPI feels "frozen"
-
-### The SDK Bug Pattern
-Third-party SDKs sometimes have bugs that are not your fault. The way to identify them:
-
-1. Strip away your code — write the simplest possible test (like our `e2e_diagnostic.py`)
-2. If the simplest test still fails, it's the SDK, not you
-3. Find the equivalent **REST API** (non-streaming) and test that too
-4. If the REST API works but the WebSocket doesn't — **document it and move on**
-
-We spent 3+ hours fighting Sarvam's streaming API before proving it was their bug. The diagnostic script was the key.
-
-### Race Conditions in Async Code
-A race condition is when two things happen "at the same time" and the order matters but isn't guaranteed.
-
-Our bug:
-```python
-sarvam_task = asyncio.create_task(listen_for_responses())  # starts listening
-await sarvam_ws.transcribe(audio)                          # sends first audio
+**BAD (what we had):**
+```
+Waiter takes order → goes to kitchen → cooks the full meal → comes back → takes next order
+While cooking: ALL OTHER CUSTOMERS WAIT. Nobody gets served.
 ```
 
-The problem: `transcribe()` was SO fast that Sarvam sent a response BEFORE `create_task()` had a chance to start the listener. We missed the first response.
-
-The fix: start the listener FIRST, send audio SECOND.
-
-```python
-sarvam_task = asyncio.create_task(listen_for_responses())  # ✅ listening first
-await asyncio.sleep(0)                                     # yield to event loop
-await sarvam_ws.transcribe(audio)                          # ✅ then send
+**GOOD (what we fixed):**
+```
+Waiter takes order → hands order to SEPARATE COOK (thread pool) → immediately takes next order
+Cook notifies waiter when meal is ready → waiter delivers it
 ```
 
+In code:
+```python
+# BAD: blocks the entire server for 2 seconds
+translated = sarvam_service.translate(text)
+
+# GOOD: hands it to a worker thread, server stays responsive
+translated = await loop.run_in_executor(None, lambda: sarvam_service.translate(text))
+```
+
+The `run_in_executor` call is like hiring a separate cook. The async event loop (the waiter) stays free to handle other WebSocket connections while the cook works.
+
+## 🎓 Lesson 15: asyncio Tasks — create_task vs await
+
+### Starting a dishwasher while you cook dinner
+Imagine you have to wash dishes and cook dinner.
+
+**Sequential (bad):**
+```python
+await wash_dishes()  # Server stops for 5 mins
+await cook_dinner()  # Server stops for 20 mins
+```
+
+**Parallel (good):**
+```python
+asyncio.create_task(wash_dishes())  # Dishwasher starts in background
+await cook_dinner()                 # You cook while dishwasher runs
+```
+
+We use this for the **Broadcast Logic**. When a speaker finishes talking, we don't make them wait for the listeners. We "fire and forget" the broadcast task so the speaker can start their next sentence immediately.
+
 ---
+
+## 🌍 Phase 2.5: Scaling & Language Nuances
 
 ## 🎓 Lesson 16: Multi-Language Routing (Query Params)
 ### 1. The "Smart" URL
@@ -268,15 +173,11 @@ We moved from hardcoded logic to dynamic parameters. By adding `?lang=...` to ou
 ### 2. Dependency Injection
 In FastAPI, we use `Query()` to grab these parameters. This allows the Speaker to be Gujarati and the Listener to be Tamil without a single backend change.
 
----
-
 ## 🎓 Lesson 17: Scalable Broadcasting (Grouping)
 ### 1. The Cost of Scaling
 If 100 listeners want Marathi, we shouldn't translate the same sentence 100 times. That costs money and time (latency).
 ### 2. The Solution: Map/Dictionary Grouping
 We now group listeners by language in the backend. We translate **once** for the "Marathi Group" and send the same result to all 50 people. This makes our app "O(N_languages)" instead of "O(N_listeners)"—a massive performance win!
-
----
 
 ## 🎓 Lesson 18: Script Normalization (The Hinglish Challenge)
 ### 1. Pure Scripts vs Code-Mixing
@@ -286,21 +187,48 @@ To get actual code-mixed text (Marathinglish), we've learned that we need a "Bri
 
 ---
 
-## 🎓 Lesson 19: War Stories from the R&D Trenches
-### 1. The Python 3.14 "Library Vanishing Act"
-**Problem**: We tried to resample audio using `audioop`, but it threw a `ModuleNotFoundError`. 
-**Lesson**: Python 3.13+ officially removed several "dead" libraries. We learned to adapt by using `scipy.signal.resample_poly`, which is more modern and powerful anyway.
-### 2. The Pydantic "White Lie"
-**Problem**: Sarvam's API rejected our audio because it wasn't a "WAV", even though it supported PCM. 
-**Lesson**: Sometimes APIs have strict "validators" (Pydantic) that are more rigid than the actual server. We learned that sending `"encoding": "audio/wav"` as a "white lie" allowed the PCM data to pass through and work perfectly.
-### 3. The "Lazy Connection" Pattern
-**Problem**: The AI server hung up on us (Code 1000) before we even started talking.
-**Lesson**: Servers often have a "Silence Timeout." If you open a connection but don't send data immediately, they hang up to save resources. We learned to wait for the **first audio chunk** before opening the AI pipe.
-### 4. Async Race Conditions
-**Problem**: We were missing the first response from the AI.
-**Lesson**: In `asyncio`, if you send data before you start your "Listener Task," the response might arrive while your code is still busy sending. We learned to **Start the Listener Task FIRST**, then send the data.
+## 🎙️ Phase 3: Hands-Free (AI in the Browser)
 
----
+## 🎓 Lesson 11: Voice Activity Detection (VAD)
+
+### The Problem with a Button
+Right now, the Speaker must hold a button. This is called **Push-to-Talk (PTT)**. It's how walkie-talkies work. For YouTube Live-style translation, nobody holds a button. The system automatically knows when you're speaking.
+
+### How VAD Works
+A VAD is a tiny AI model that listens to your microphone 100 times per second and answers one question: **"Is a human speaking right now? Yes or No?"**
+
+```
+🎙 [silence] → VAD: No  → ignore
+🎙 [throat clear] → VAD: No  → ignore  
+🎙 "Hello everyone" → VAD: Yes → START collecting audio
+🎙 [pause] → VAD: No (for 0.3s) → END collection, send to backend
+```
+
+The model we use (`@ricky0123/vad-web`) runs the **Silero VAD** — a 1.8MB neural network compiled to WebAssembly. It runs entirely in your browser, with zero server calls.
+
+## 🎓 Lesson 12: Streaming STT vs Batch STT
+
+### The Core Difference
+
+**Batch STT (what we use now):**
+```
+You speak for 5 seconds → STOP → Send audio file → Wait 1.5s → Get transcript
+```
+Like writing an email, sending it, and waiting for a reply.
+
+**Streaming STT (Future Goal):**
+```
+You speak → 200ms → partial transcript → 200ms → updated transcript → ...
+```
+Like a phone call where the other person hears you in real time.
+
+### Why Sarvam's Streaming API Failed Us
+During our R&D, we discovered that the Sarvam Streaming WebSocket:
+- Accepted our connection ✅
+- Accepted audio data ✅
+- Returned **zero transcripts** ❌ (server-side bug, not our fault)
+
+This is why we focus on **Manual Auto-Segmentation** using VAD in Phase 3. It gives the "feel" of streaming while using the reliable Batch API.
 
 ## 🎓 Lesson 20: The "Vite Asset Wall" (AI/WASM)
 In Phase 3, we learned that Vite's internal module rewriter (HMR) can corrupt dynamic WebAssembly and ONNX model requests, especially when accessing the site via an IP address. 
@@ -316,15 +244,46 @@ Browsers (Chrome/Safari) silently disable `navigator.mediaDevices` if the site i
 
 ---
 
-## 🗺️ The Big Picture: Where We Are
+## 🛡️ The R&D War Room: War Stories from the Trenches
 
-```
-Phase 1 ✅ → Phase 2 ✅ → Phase 3 ✅ → Phase 4 📋
-  │              │              │              │
-Single user    Push-to-Talk   Hands-Free    Production
-batch          + Broadcast    Auto-Segment  Multi-room
-translation    One-to-Many    (Silero VAD)  (LiveKit)
-                9 languages
+### Phase 2 R&D Lessons: What We Discovered the Hard Way
+
+### The Async/Sync Trap
+**You will hit this constantly as a backend developer.** The rule is simple:
+> If you are inside an `async def` function, every slow operation must be `await`-ed or offloaded to a thread pool. NEVER call a blocking function directly. FastAPI will freeze and other users won't be able to connect.
+
+### The SDK Bug Pattern
+Third-party SDKs sometimes have bugs that are not your fault. The way to identify them:
+1. Strip away your code — write the simplest possible test (like our `e2e_diagnostic.py`)
+2. If the simplest test still fails, it's the SDK, not you
+3. Find the equivalent **REST API** (non-streaming) and test that too
+4. If the REST API works but the WebSocket doesn't — **document it and move on**
+
+We spent 3+ hours fighting Sarvam's streaming API before proving it was their bug. The diagnostic script was the key.
+
+### Race Conditions in Async Code
+A race condition is when two things happen "at the same time" and the order matters but isn't guaranteed. Our bug: `transcribe()` was SO fast that Sarvam sent a response BEFORE `create_task()` had a chance to start the listener. We missed the first response.
+
+**The fix**: start the listener FIRST, then send audio SECOND.
+```python
+sarvam_task = asyncio.create_task(listen_for_responses())  # ✅ listening first
+await asyncio.sleep(0)                                     # yield to event loop
+await sarvam_ws.transcribe(audio)                          # ✅ then send
 ```
 
-You have built a real working product. Phase 3 takes it from "impressive demo" to "production-ready live translation platform."
+## 🎓 Lesson 19: Python & API Quirks
+
+### 1. The Python 3.14 "Library Vanishing Act"
+**Problem**: We tried to resample audio using `audioop`, but it threw a `ModuleNotFoundError`. 
+**Lesson**: Python 3.13+ officially removed several "dead" libraries. We learned to adapt by using `scipy.signal.resample_poly`, which is more modern and powerful anyway.
+
+### 2. The Pydantic "White Lie"
+**Problem**: Sarvam's API rejected our audio because it wasn't a "WAV", even though it supported PCM. 
+**Lesson**: Sometimes APIs have strict "validators" (Pydantic) that are more rigid than the actual server. We learned that sending `"encoding": "audio/wav"` as a "white lie" allowed the PCM data to pass through and work perfectly.
+
+### 3. The "Lazy Connection" Pattern
+**Problem**: The AI server hung up on us (Code 1000) before we even started talking.
+**Lesson**: Servers often have a "Silence Timeout." We learned to wait for the **first audio chunk** before opening the AI pipe.
+
+---
+**You have built a real working product. Phase 3 takes it from "impressive demo" to "production-ready live translation platform."**

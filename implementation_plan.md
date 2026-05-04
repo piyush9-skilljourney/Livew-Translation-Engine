@@ -41,22 +41,23 @@
 
 ---
 
-### 🔄 Phase 3: Auto-Segmenting Broadcast (PLANNED)
-- **Goal:** Zero-button, continuous translation *without* needing Deepgram.
-- Replace manual button with browser-side VAD (`@ricky0123/vad-web`).
-- **Auto-Segmentation:** VAD detects speech pause -> sends audio -> triggers STT.
-- Replace `ScriptProcessorNode` with `AudioWorkletNode`.
-- This provides a "walkie-talkie" feel but completely hands-free.
+### ✅ Phase 3: Hands-Free Auto-Segmentation (COMPLETED — 2026-05-04)
+- **Goal:** Zero-button, continuous translation using browser-side AI.
+- [x] Integrated browser-side VAD (`@ricky0123/vad-react`) with Silero V5 model.
+- [x] **Auto-Segmentation:** VAD neural network detects speech start/end and triggers translation automatically.
+- [x] Implemented "Public Asset Store" strategy for reliable WASM/ONNX model delivery.
+- [x] Resolved "StrictMode" lifecycle issues for stable AI engine persistence.
+- [x] Added visual pulsing indicator for hands-free mode.
+- [x] Added "Manual vs Hands-Free" mode toggle.
 
-**Architecture:**
-```
-Mic → AudioWorklet + VAD → [Speech detected] → Collect PCM
-[Pause detected] → Send PCM to FastAPI /ws/speaker
-                 → Sarvam Batch STT
-                 → Sarvam Translate → Sarvam TTS
-                 → Broadcast to /ws/listener × N
-```
+---
 
+### 📡 Phase 4: Production Polish & Multi-Language Scaling (UP NEXT)
+- [ ] Multi-language Listener support (Grouped broadcast logic - *Partially implemented in Phase 2.5*).
+- [ ] Room-based sessions (Speaker creates a room, Listeners join via code).
+- [ ] LiveKit / WebRTC integration for even lower latency distribution.
+- [ ] Real-time transcription scroll for Listeners.
+- [ ] Latency & Network health indicators.
 
 ---
 

@@ -1,5 +1,6 @@
-import React, { useState, useRef } from 'react';
-import { Mic, MicOff, Volume2, Globe, ArrowRight, Languages } from 'lucide-react';
+import React, { useState, useRef, useEffect } from 'react';
+import { useMicVAD, utils } from '@ricky0123/vad-react';
+import { Mic, MicOff, Volume2, Globe, ArrowRight, Languages, Zap, Hand } from 'lucide-react';
 import './App.css';
 
 // ─── Supported target languages ───────────────────────────────────────────────
@@ -17,12 +18,25 @@ const LANGUAGES = [
 ];
 
 
+// ─── Audio Helpers ────────────────────────────────────────────────────────────
+const floatTo16BitPCM = (input: Float32Array): Int16Array => {
+  const pcm16 = new Int16Array(input.length);
+  for (let i = 0; i < input.length; i++) {
+    const s = Math.max(-1, Math.min(1, input[i]));
+    pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  }
+  return pcm16;
+};
+
 const WS_HOST = window.location.hostname === 'localhost' ? 'localhost:8000' : `${window.location.hostname}:8000`;
 
 function App() {
   const [role, setRole] = useState<'selection' | 'speaker' | 'listener'>('selection');
+  const [mode, setMode] = useState<'manual' | 'auto'>('manual');
+  const modeRef = useRef(mode);
+  useEffect(() => { modeRef.current = mode; }, [mode]);
   const [targetLang, setTargetLang] = useState('mr-IN');
-  const [speakerLang, setSpeakerLang] = useState('gu-IN'); // Default Gujarati for Speaker
+  const [speakerLang, setSpeakerLang] = useState('gu-IN');
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [originalText, setOriginalText] = useState('');
@@ -66,7 +80,52 @@ function App() {
     return () => {
       if (socket.readyState === WebSocket.OPEN) socket.close();
     };
-  }, [role, targetLang]);
+  }, [role, targetLang, speakerLang]);
+
+  // ── HANDS-FREE VAD LOGIC ────────────────────────────────────────────────
+  const vadOptions = React.useMemo(() => ({
+    startOnLoad: false,
+    baseAssetPath: window.location.origin + "/",
+    onnxWASMBasePath: window.location.origin + "/",
+    model: "v5" as const,
+    ortConfig(ort: any) {
+      ort.env.wasm.wasmPaths = window.location.origin + "/";
+    },
+    onSpeechStart: () => {
+      if (modeRef.current === 'auto') {
+        setIsRecording(true);
+        setError(null);
+      }
+    },
+    onSpeechEnd: (audio: Float32Array) => {
+      if (modeRef.current !== 'auto') return;
+      setIsRecording(false);
+      setIsProcessing(true);
+
+      const pcm16 = floatTo16BitPCM(audio);
+
+      if (socketRef.current?.readyState === WebSocket.OPEN) {
+        socketRef.current.send(pcm16.buffer);
+        socketRef.current.send(JSON.stringify({ type: 'flush' }));
+      }
+      
+      setTimeout(() => setIsProcessing(false), 5000);
+    },
+    onVADMisfire: () => {
+      if (modeRef.current === 'auto') setIsRecording(false);
+    }
+  }), []);
+
+  const vad = useMicVAD(vadOptions);
+
+  // Toggle VAD based on mode
+  useEffect(() => {
+    if (role === 'speaker' && mode === 'auto' && !vad.loading && !vad.errored) {
+      vad.start();
+    } else {
+      vad.pause();
+    }
+  }, [role, mode, vad.loading, vad.errored]);
 
   // ── Audio recording ───────────────────────────────────────────────────────
   const startRecording = async () => {
@@ -221,25 +280,51 @@ function App() {
             <div className="card-header">
               <div className="status">
                 <span className={`dot ${isRecording ? 'pulse' : ''}`}></span>
-                {isProcessing ? 'PROCESSING...' : isRecording ? 'LIVE BROADCASTING' : 'READY TO START'}
+                {isProcessing ? 'PROCESSING...' : isRecording ? 'LIVE' : 'READY'}
+              </div>
+              
+              <div className="mode-toggle">
+                <button 
+                  className={`mode-btn ${mode === 'manual' ? 'active' : ''}`}
+                  onClick={() => setMode('manual')}
+                >
+                  <Hand size={14} /> Manual
+                </button>
+                <button 
+                  className={`mode-btn ${mode === 'auto' ? 'active' : ''}`}
+                  onClick={() => setMode('auto')}
+                >
+                  <Zap size={14} /> Hands-Free
+                </button>
               </div>
             </div>
 
             <div className="controls">
-              <button
-                className={`mic-button ${isRecording ? 'active' : ''} ${isProcessing ? 'loading' : ''}`}
-                onMouseDown={startRecording}
-                onMouseUp={stopRecording}
-                onMouseLeave={isRecording ? stopRecording : undefined}
-                onTouchStart={() => startRecording()}
-                onTouchEnd={() => stopRecording()}
-                disabled={isProcessing}
-              >
-                {isRecording ? <MicOff size={48} /> : <Mic size={48} />}
-                <span className="button-text">
-                  {isProcessing ? 'Translating...' : isRecording ? 'Release to Translate' : 'Hold to Speak'}
-                </span>
-              </button>
+              {mode === 'manual' ? (
+                <button
+                  className={`mic-button ${isRecording ? 'active' : ''} ${isProcessing ? 'loading' : ''}`}
+                  onMouseDown={startRecording}
+                  onMouseUp={stopRecording}
+                  onMouseLeave={isRecording ? stopRecording : undefined}
+                  onTouchStart={() => startRecording()}
+                  onTouchEnd={() => stopRecording()}
+                  disabled={isProcessing}
+                >
+                  {isRecording ? <MicOff size={48} /> : <Mic size={48} />}
+                  <span className="button-text">
+                    {isProcessing ? 'Translating...' : isRecording ? 'Release to Translate' : 'Hold to Speak'}
+                  </span>
+                </button>
+              ) : (
+                <div className="auto-mic-indicator">
+                  <div className={`visualizer ${isRecording ? 'active' : ''}`}>
+                    <Mic size={48} className={isRecording ? 'pulse-blue' : ''} />
+                  </div>
+                  <p className="status-text">
+                    {isRecording ? "Listening to you..." : "Speak naturally, I'm listening"}
+                  </p>
+                </div>
+              )}
             </div>
 
             {error && (

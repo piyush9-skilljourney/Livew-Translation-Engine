@@ -53,17 +53,21 @@ This is why we use **Deepgram Nova-2** for Phase 3. Their streaming STT returns 
 ### The Key Parameter: `interim_results`
 ```
 interim_results=true → "Give me guesses as I talk"
-interim_results=false → "Wait until I'm done, then give the answer"
-```
+interim_results=false → "Wait until I'm done,## Phase 3: Hands-Free Auto-Segmentation (COMPLETE ✅)
+- **Status**: Production Ready
+- **Key Achievements**:
+  - Integrated Silero VAD (Voice Activity Detection) via `@ricky0123/vad-react`.
+  - Implemented automatic speech boundary detection (auto-clipping).
+  - Configured "Public Asset Store" for reliable WASM/ONNX delivery.
+  - Eliminated "Double-Mount" bugs by disabling StrictMode.
+  - Added Mode Toggle (Manual vs Hands-Free) in Speaker Studio.
 
----
-
-## 🎓 Lesson 11 (Preview): Voice Activity Detection (VAD)
-
-### The Problem with a Button
-Right now, the Speaker must hold a button. This is called **Push-to-Talk (PTT)**. It's how walkie-talkies work.
-
-For YouTube Live-style translation, nobody holds a button. The system automatically knows when you're speaking.
+## Phase 4: Production Polish & Scaling (UP NEXT 🔜)
+- [ ] UI/UX overhaul for "YouTube Live" broadcast feel.
+- [ ] Real-time Transcript scrolling for Listeners.
+- [ ] Network status indicator (Latency tracking).
+- [ ] Support for multiple simultaneous speakers.
+ally knows when you're speaking.
 
 ### How VAD Works
 A VAD is a tiny AI model that listens to your microphone 100 times per second and answers one question: **"Is a human speaking right now? Yes or No?"**
@@ -298,15 +302,29 @@ To get actual code-mixed text (Marathinglish), we've learned that we need a "Bri
 
 ---
 
+## 🎓 Lesson 20: The "Vite Asset Wall" (AI/WASM)
+In Phase 3, we learned that Vite's internal module rewriter (HMR) can corrupt dynamic WebAssembly and ONNX model requests, especially when accessing the site via an IP address. 
+- **The Fix**: The "Public Folder Method." By moving `.wasm`, `.onnx`, and `.mjs` files to the `public/` directory and using `window.location.origin` for absolute pathing, we bypass Vite's processing entirely.
+
+## 🎓 Lesson 21: React 18 vs. Heavy State (VAD)
+React 18's `StrictMode` mounts components twice. For a neural network engine that takes 2-3 seconds to load, this causes a race condition where the first engine is destroyed just as the second one starts.
+- **The Fix**: In heavy AI/WASM apps, it is often safer to disable `StrictMode` in `main.tsx` to ensure predictable initialization lifecycles.
+
+## 🎓 Lesson 22: The "Insecure Context" Trap
+Browsers (Chrome/Safari) silently disable `navigator.mediaDevices` if the site is not served via `localhost` or `HTTPS`. Accessing `http://192.168.x.x` will fail by default.
+- **The Workaround**: Use `chrome://flags/#unsafely-treat-insecure-origin-as-secure` for local testing, or use **ngrok** for full mobile/HTTPS verification.
+
+---
+
 ## 🗺️ The Big Picture: Where We Are
 
 ```
-Phase 1 ✅ → Phase 2 ✅ → Phase 3 🔄 → Phase 4 📋
+Phase 1 ✅ → Phase 2 ✅ → Phase 3 ✅ → Phase 4 📋
   │              │              │              │
-Single user    Push-to-Talk   True Live     Production
-batch          + Broadcast    Streaming     Multi-room
-translation    One-to-Many    (Deepgram +   (LiveKit)
-                9 languages   VAD)
+Single user    Push-to-Talk   Hands-Free    Production
+batch          + Broadcast    Auto-Segment  Multi-room
+translation    One-to-Many    (Silero VAD)  (LiveKit)
+                9 languages
 ```
 
 You have built a real working product. Phase 3 takes it from "impressive demo" to "production-ready live translation platform."

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.services.sarvam import sarvam_service
@@ -27,7 +27,8 @@ app.add_middleware(
 from app.api.endpoints import router as translation_router
 app.include_router(translation_router, prefix="/api/v1")
 
-active_listeners = set()
+# Store listeners as a dict: websocket → target_language_code
+active_listeners: dict[WebSocket, str] = {}
 
 
 def pcm_chunks_to_wav_b64(chunks: list[bytes], sample_rate: int = 16000) -> str:
@@ -46,18 +47,21 @@ def pcm_chunks_to_wav_b64(chunks: list[bytes], sample_rate: int = 16000) -> str:
 # LISTENER ENDPOINT
 # ──────────────────────────────────────────────
 @app.websocket("/ws/listener")
-async def websocket_listener(websocket: WebSocket):
+async def websocket_listener(
+    websocket: WebSocket,
+    lang: str = Query(default="mr-IN")
+):
     await websocket.accept()
-    active_listeners.add(websocket)
-    print(f"👥 Listener Joined. Total: {len(active_listeners)}", flush=True)
+    active_listeners[websocket] = lang
+    print(f"👥 Listener Joined ({lang}). Total: {len(active_listeners)}", flush=True)
     try:
         while True:
             await websocket.receive()
     except WebSocketDisconnect:
-        active_listeners.discard(websocket)
+        active_listeners.pop(websocket, None)
         print("🔌 Listener Disconnected", flush=True)
     except Exception as e:
-        active_listeners.discard(websocket)
+        active_listeners.pop(websocket, None)
         print(f"❌ Listener Error: {e}", flush=True)
 
 
@@ -65,37 +69,46 @@ async def websocket_listener(websocket: WebSocket):
 # HELPER: translate + TTS + broadcast
 # ──────────────────────────────────────────────
 async def broadcast_translation(text: str, loop: asyncio.AbstractEventLoop):
-    if not text.strip():
+    """For each listener, translate+TTS into their chosen language and send."""
+    if not text.strip() or not active_listeners:
         return
-    try:
-        translated = await loop.run_in_executor(
-            None, lambda: sarvam_service.translate(text, target_language="mr-IN")
-        )
-        if not translated:
-            print("⚠️ Translation returned empty.", flush=True)
-            return
-        print(f"✅ Translated: {translated}", flush=True)
 
-        audio_b64 = await loop.run_in_executor(
-            None, lambda: sarvam_service.text_to_speech(translated, target_language="mr-IN")
-        )
-        if not audio_b64:
-            print("⚠️ TTS returned empty.", flush=True)
-            return
+    # Group listeners by language so we only translate+TTS once per language
+    lang_groups: dict[str, list[WebSocket]] = {}
+    for ws, lang in list(active_listeners.items()):
+        lang_groups.setdefault(lang, []).append(ws)
 
-        print(f"🔊 Broadcasting to {len(active_listeners)} listener(s).", flush=True)
-        broadcast_msg = {"type": "audio", "audio": audio_b64, "text": translated}
+    for lang, listeners in lang_groups.items():
+        try:
+            translated = await loop.run_in_executor(
+                None, lambda l=lang: sarvam_service.translate(text, target_language=l)
+            )
+            if not translated:
+                print(f"⚠️ Translation to {lang} returned empty.", flush=True)
+                continue
+            print(f"✅ [{lang}] Translated: {translated}", flush=True)
 
-        dead = set()
-        for listener in list(active_listeners):
-            try:
-                await listener.send_json(broadcast_msg)
-            except Exception:
-                dead.add(listener)
-        active_listeners.difference_update(dead)
+            audio_b64 = await loop.run_in_executor(
+                None, lambda l=lang, t=translated: sarvam_service.text_to_speech(t, target_language=l)
+            )
+            if not audio_b64:
+                print(f"⚠️ TTS for {lang} returned empty.", flush=True)
+                continue
 
-    except Exception as e:
-        print(f"❌ Broadcast Error: {e}", flush=True)
+            broadcast_msg = {"type": "audio", "audio": audio_b64, "text": translated}
+            print(f"🔊 Broadcasting [{lang}] to {len(listeners)} listener(s).", flush=True)
+
+            dead = []
+            for listener in listeners:
+                try:
+                    await listener.send_json(broadcast_msg)
+                except Exception:
+                    dead.append(listener)
+            for d in dead:
+                active_listeners.pop(d, None)
+
+        except Exception as e:
+            print(f"❌ Broadcast Error [{lang}]: {e}", flush=True)
 
 
 # ──────────────────────────────────────────────

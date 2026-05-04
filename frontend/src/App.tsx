@@ -4,24 +4,30 @@ import './App.css';
 
 // ─── Supported target languages ───────────────────────────────────────────────
 const LANGUAGES = [
+  { code: 'en-IN', label: 'English', native: 'English' },
   { code: 'mr-IN', label: 'Marathi', native: 'मराठी' },
   { code: 'hi-IN', label: 'Hindi',   native: 'हिन्दी' },
+  { code: 'gu-IN', label: 'Gujarati', native: 'ગુજરાતી' },
   { code: 'bn-IN', label: 'Bengali', native: 'বাংলা' },
   { code: 'ta-IN', label: 'Tamil',   native: 'தமிழ்' },
   { code: 'te-IN', label: 'Telugu',  native: 'తెలుగు' },
   { code: 'kn-IN', label: 'Kannada', native: 'ಕನ್ನಡ' },
   { code: 'ml-IN', label: 'Malayalam', native: 'മലയാളം' },
-  { code: 'gu-IN', label: 'Gujarati', native: 'ગુજરાતી' },
   { code: 'pa-IN', label: 'Punjabi', native: 'ਪੰਜਾਬੀ' },
 ];
+
+
+const WS_HOST = window.location.hostname === 'localhost' ? 'localhost:8000' : `${window.location.hostname}:8000`;
 
 function App() {
   const [role, setRole] = useState<'selection' | 'speaker' | 'listener'>('selection');
   const [targetLang, setTargetLang] = useState('mr-IN');
+  const [speakerLang, setSpeakerLang] = useState('gu-IN'); // Default Gujarati for Speaker
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [originalText, setOriginalText] = useState('');
   const [translatedText, setTranslatedText] = useState('');
+  const [error, setError] = useState<string | null>(null);
 
   const isRecordingRef = useRef(false);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -34,8 +40,8 @@ function App() {
     if (role === 'selection') return;
 
     const wsUrl = role === 'speaker'
-      ? 'ws://localhost:8000/ws/speaker'
-      : `ws://localhost:8000/ws/listener?lang=${targetLang}`;
+      ? `ws://${WS_HOST}/ws/speaker?lang=${speakerLang}`
+      : `ws://${WS_HOST}/ws/listener?lang=${targetLang}`;
 
     const socket = new WebSocket(wsUrl);
     socketRef.current = socket;
@@ -64,7 +70,11 @@ function App() {
 
   // ── Audio recording ───────────────────────────────────────────────────────
   const startRecording = async () => {
+    setError(null);
     try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("Microphone access is not supported in this browser or requires HTTPS.");
+      }
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       mediaStreamRef.current = stream;
 
@@ -101,8 +111,11 @@ function App() {
       processor.connect(gainNode);
       gainNode.connect(audioContext.destination);
 
-    } catch (err) {
+    } catch (err: any) {
       console.error('Microphone error:', err);
+      setError(err.message || "Could not access microphone.");
+      setIsRecording(false);
+      isRecordingRef.current = false;
     }
   };
 
@@ -131,20 +144,36 @@ function App() {
         <header>
           <div className="logo">
             <Globe className="icon-blue" />
-            <h1>Antigravity Live</h1>
+            <h1>BhashaCast</h1>
           </div>
-          <p className="subtitle">Real-Time Indian Language Translation</p>
+          <p className="subtitle">Real-Time Indian Language Broadcast</p>
         </header>
 
         <div className="role-choices">
-          <div className="card choice-card" onClick={() => setRole('speaker')}>
+          <div className="card choice-card listener-choice" onClick={(e) => e.stopPropagation()}>
             <Mic size={64} className="icon-blue" />
             <h2>I am a Speaker</h2>
-            <p>Broadcast your voice in Hindi and have it translated live.</p>
-            <button className="btn-primary">Enter Speaker Studio <ArrowRight size={16} /></button>
+            <p>What language will you speak?</p>
+
+            <div className="lang-grid">
+              {LANGUAGES.map(lang => (
+                <button
+                  key={`sp-${lang.code}`}
+                  className={`lang-btn ${speakerLang === lang.code ? 'selected' : ''}`}
+                  onClick={() => setSpeakerLang(lang.code)}
+                >
+                  <span className="lang-native">{lang.native}</span>
+                  <span className="lang-english">{lang.label}</span>
+                </button>
+              ))}
+            </div>
+
+            <button className="btn-primary" onClick={() => setRole('speaker')}>
+              Enter Studio in {LANGUAGES.find(l=>l.code===speakerLang)?.label} <ArrowRight size={16} />
+            </button>
           </div>
 
-          <div className="card choice-card listener-choice">
+          <div className="card choice-card listener-choice" onClick={(e) => e.stopPropagation()}>
             <Volume2 size={64} className="icon-blue" />
             <h2>I am a Listener</h2>
             <p>Choose the language you want to listen in:</p>
@@ -177,12 +206,12 @@ function App() {
       <header>
         <div className="logo" onClick={() => { setRole('selection'); setOriginalText(''); setTranslatedText(''); }} style={{ cursor: 'pointer' }}>
           <Globe className="icon-blue" />
-          <h1>Antigravity {role === 'speaker' ? 'Studio' : 'Room'}</h1>
+          <h1>BhashaCast {role === 'speaker' ? 'Studio' : 'Room'}</h1>
         </div>
         <p className="subtitle">
           {role === 'speaker'
-            ? 'Hindi Speaker Dashboard'
-            : `Listening in ${selectedLang.label} (${selectedLang.native})`}
+            ? `Speaking in ${LANGUAGES.find(l=>l.code===speakerLang)?.label}`
+            : `Listening in ${LANGUAGES.find(l=>l.code===targetLang)?.label}`}
         </p>
       </header>
 
@@ -202,8 +231,8 @@ function App() {
                 onMouseDown={startRecording}
                 onMouseUp={stopRecording}
                 onMouseLeave={isRecording ? stopRecording : undefined}
-                onTouchStart={(e) => { e.preventDefault(); startRecording(); }}
-                onTouchEnd={(e) => { e.preventDefault(); stopRecording(); }}
+                onTouchStart={() => startRecording()}
+                onTouchEnd={() => stopRecording()}
                 disabled={isProcessing}
               >
                 {isRecording ? <MicOff size={48} /> : <Mic size={48} />}
@@ -212,6 +241,12 @@ function App() {
                 </span>
               </button>
             </div>
+
+            {error && (
+              <div className="error-message">
+                ⚠️ {error}
+              </div>
+            )}
 
             <div className="results-container">
               <div className="result-card full-width">
@@ -252,7 +287,7 @@ function App() {
         <button className="btn-text" onClick={() => { setRole('selection'); setOriginalText(''); setTranslatedText(''); }}>
           ← Change Role
         </button>
-        <p>© 2026 Live Translation Engine | Powered by Sarvam AI</p>
+        <p>© 2026 BhashaCast | Powered by Sarvam AI</p>
       </footer>
     </div>
   );

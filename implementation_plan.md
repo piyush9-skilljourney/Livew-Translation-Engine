@@ -1,4 +1,4 @@
-# Implementation Plan: Live Translation Engine
+# Implementation Plan: BhashaCast (Live Translation Engine)
 
 ## 🚀 Roadmap Overview
 
@@ -33,20 +33,30 @@
 
 ---
 
-### 🔄 Phase 3: True Live Streaming (PLANNED)
-- **Goal:** Zero-button, continuous translation like YouTube Live.
-- Replace `ScriptProcessorNode` with `AudioWorkletNode`
-- Replace Sarvam Streaming STT with Deepgram Nova-2 (proven streaming STT)
-- Implement browser-side VAD (`@ricky0123/vad-web`) to auto-detect speech
-- Translate at sentence-boundary level for low latency
-- Target latency: **1–2 seconds**
+### 🌟 Phase 2.5: BhashaCast Upgrades (COMPLETED)
+- **Goal:** Enhance the user experience with more language control and better naming.
+- [x] Renamed app to **BhashaCast**.
+- [x] Speaker Language Selection (Gujarati, Hindi, etc.) passed dynamically to STT.
+- [x] Addressed "Hinglish/Marathinglish" (Conversational code-mixing requires LLMs; Sarvam standardizes to pure scripts, but Sarvam TTS handles English gracefully).
+
+---
+
+### 🔄 Phase 3: Auto-Segmenting Broadcast (PLANNED)
+- **Goal:** Zero-button, continuous translation *without* needing Deepgram.
+- Replace manual button with browser-side VAD (`@ricky0123/vad-web`).
+- **Auto-Segmentation:** VAD detects speech pause -> sends audio -> triggers STT.
+- Replace `ScriptProcessorNode` with `AudioWorkletNode`.
+- This provides a "walkie-talkie" feel but completely hands-free.
 
 **Architecture:**
 ```
-Mic → AudioWorklet → FastAPI /ws/speaker → Deepgram STT (streaming)
-                          → Sarvam Translate → Sarvam TTS
-                          → Broadcast to /ws/listener × N
+Mic → AudioWorklet + VAD → [Speech detected] → Collect PCM
+[Pause detected] → Send PCM to FastAPI /ws/speaker
+                 → Sarvam Batch STT
+                 → Sarvam Translate → Sarvam TTS
+                 → Broadcast to /ws/listener × N
 ```
+
 
 ---
 

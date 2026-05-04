@@ -17,6 +17,10 @@ This file is your personal mentor's log. Every concept, every bug, every decisio
 | L13 | Event loops & `run_in_executor` | Why a chef can't cook and take orders at the same time |
 | L14 | API keys, tokens, and security | The difference between your front door key and a hotel key card |
 | L15 | asyncio Tasks — create_task vs await | Starting a dishwasher while you cook dinner |
+| L16 | Multi-Language Routing | The "Switchboard" operator |
+| L17 | Scalable Broadcasting | Grouping people by their language |
+| L18 | Script Normalization | Pure native script vs Code-mixing |
+| L19 | R&D War Stories | Real-world debugging & Python 3.14 |
 
 ---
 
@@ -251,6 +255,46 @@ sarvam_task = asyncio.create_task(listen_for_responses())  # ✅ listening first
 await asyncio.sleep(0)                                     # yield to event loop
 await sarvam_ws.transcribe(audio)                          # ✅ then send
 ```
+
+---
+
+## 🎓 Lesson 16: Multi-Language Routing (Query Params)
+### 1. The "Smart" URL
+We moved from hardcoded logic to dynamic parameters. By adding `?lang=...` to our WebSocket URL, the frontend can "tell" the backend its preferences before the connection is even fully open.
+### 2. Dependency Injection
+In FastAPI, we use `Query()` to grab these parameters. This allows the Speaker to be Gujarati and the Listener to be Tamil without a single backend change.
+
+---
+
+## 🎓 Lesson 17: Scalable Broadcasting (Grouping)
+### 1. The Cost of Scaling
+If 100 listeners want Marathi, we shouldn't translate the same sentence 100 times. That costs money and time (latency).
+### 2. The Solution: Map/Dictionary Grouping
+We now group listeners by language in the backend. We translate **once** for the "Marathi Group" and send the same result to all 50 people. This makes our app "O(N_languages)" instead of "O(N_listeners)"—a massive performance win!
+
+---
+
+## 🎓 Lesson 18: Script Normalization (The Hinglish Challenge)
+### 1. Pure Scripts vs Code-Mixing
+Sarvam's STT and Translation models are "Script-Pure." They convert conversational "Hinglish" back into pure Devanagari script. 
+### 2. The Bridge to Conversational
+To get actual code-mixed text (Marathinglish), we've learned that we need a "Bridge" model—an LLM like Gemini that understands the *vibe* of the conversation, not just the dictionary definitions.
+
+---
+
+## 🎓 Lesson 19: War Stories from the R&D Trenches
+### 1. The Python 3.14 "Library Vanishing Act"
+**Problem**: We tried to resample audio using `audioop`, but it threw a `ModuleNotFoundError`. 
+**Lesson**: Python 3.13+ officially removed several "dead" libraries. We learned to adapt by using `scipy.signal.resample_poly`, which is more modern and powerful anyway.
+### 2. The Pydantic "White Lie"
+**Problem**: Sarvam's API rejected our audio because it wasn't a "WAV", even though it supported PCM. 
+**Lesson**: Sometimes APIs have strict "validators" (Pydantic) that are more rigid than the actual server. We learned that sending `"encoding": "audio/wav"` as a "white lie" allowed the PCM data to pass through and work perfectly.
+### 3. The "Lazy Connection" Pattern
+**Problem**: The AI server hung up on us (Code 1000) before we even started talking.
+**Lesson**: Servers often have a "Silence Timeout." If you open a connection but don't send data immediately, they hang up to save resources. We learned to wait for the **first audio chunk** before opening the AI pipe.
+### 4. Async Race Conditions
+**Problem**: We were missing the first response from the AI.
+**Lesson**: In `asyncio`, if you send data before you start your "Listener Task," the response might arrive while your code is still busy sending. We learned to **Start the Listener Task FIRST**, then send the data.
 
 ---
 

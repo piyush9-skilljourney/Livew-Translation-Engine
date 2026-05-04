@@ -14,6 +14,8 @@ app = FastAPI(title=settings.PROJECT_NAME)
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "http://10.179.32.64:5173", # Your network IP
+    "*", # Allow all for easier local network testing
 ]
 
 app.add_middleware(
@@ -115,9 +117,12 @@ async def broadcast_translation(text: str, loop: asyncio.AbstractEventLoop):
 # SPEAKER ENDPOINT
 # ──────────────────────────────────────────────
 @app.websocket("/ws/speaker")
-async def websocket_speaker(websocket: WebSocket):
+async def websocket_speaker(
+    websocket: WebSocket,
+    lang: str = Query(default="hi-IN")
+):
     await websocket.accept()
-    print("🎤 Speaker Connected", flush=True)
+    print(f"🎤 Speaker Connected ({lang})", flush=True)
     loop = asyncio.get_event_loop()
 
     try:
@@ -166,7 +171,7 @@ async def websocket_speaker(websocket: WebSocket):
 
             try:
                 transcript = await loop.run_in_executor(
-                    None, lambda: sarvam_service.transcribe(tmp_path, language_code="hi-IN")
+                    None, lambda l=lang: sarvam_service.transcribe(tmp_path, language_code=l)
                 )
             finally:
                 os.unlink(tmp_path)

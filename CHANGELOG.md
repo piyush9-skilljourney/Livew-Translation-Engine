@@ -1,5 +1,28 @@
 # Changelog & Progress Log
 
+## [Phase 4] - Resilience & Production Polish — 2026-05-04
+
+### ✅ Achieved
+- **Listener Audio Queue**: Implemented sequential audio playback queue to prevent simultaneous overlapping translations.
+- **WebSocket Reconnection**: Added exponential backoff reconnect logic for dropped network connections.
+- **Buffer Growth Guard**: Hard-capped backend PCM buffer to 300 chunks (~15s) to prevent OOM memory leaks.
+- **Voice Selection**: Implemented dual-voice grouping (Language + Voice). Used 'aditya' (Male) and 'anushka' (Female) Sarvam v3 voices.
+- **Latency Telemetry**: Added `time.perf_counter()` to backend for precise STT/Translate/TTS logs, and E2E latency UI indicator.
+- Updated project architecture documentation.
+
+---
+
+## [Phase 3] - Hands-Free Broadcast (VAD) — 2026-05-04
+
+### ✅ Achieved
+- Integrated local Voice Activity Detection (`@ricky0123/vad-react`) via Silero V5 neural network.
+- Automated speech boundary detection (auto-clipping) for hands-free broadcasting.
+- Created robust "Public Asset Store" to bypass Vite's HMR corrupting WASM/ONNX model loading.
+- Fixed React 18 `StrictMode` double-mount issue destroying the VAD lifecycle.
+- Overhauled UI to "Premium Studio" aesthetic (Dark mode, glassmorphism, Google Fonts).
+
+---
+
 ## [Phase 2] - Push-to-Talk Broadcast — 2026-05-04
 
 ### ✅ Achieved

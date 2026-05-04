@@ -29,9 +29,12 @@ app.add_middleware(
 from app.api.endpoints import router as translation_router
 app.include_router(translation_router, prefix="/api/v1")
 
-# Store listeners as a dict: websocket → target_language_code
-active_listeners: dict[WebSocket, str] = {}
+import time
 
+# Store listeners as a dict: websocket → (target_language_code, voice)
+active_listeners: dict[WebSocket, tuple[str, str]] = {}
+
+MAX_BUFFER_CHUNKS = 300  # Approx 15 seconds of audio to prevent OOM
 
 def pcm_chunks_to_wav_b64(chunks: list[bytes], sample_rate: int = 16000) -> str:
     """Combine all raw PCM chunks into one complete WAV file and return as base64."""
@@ -51,11 +54,12 @@ def pcm_chunks_to_wav_b64(chunks: list[bytes], sample_rate: int = 16000) -> str:
 @app.websocket("/ws/listener")
 async def websocket_listener(
     websocket: WebSocket,
-    lang: str = Query(default="mr-IN")
+    lang: str = Query(default="mr-IN"),
+    voice: str = Query(default="aditya")
 ):
     await websocket.accept()
-    active_listeners[websocket] = lang
-    print(f"👥 Listener Joined ({lang}). Total: {len(active_listeners)}", flush=True)
+    active_listeners[websocket] = (lang, voice)
+    print(f"👥 Listener Joined ({lang}, {voice}). Total: {len(active_listeners)}", flush=True)
     try:
         while True:
             await websocket.receive()
@@ -75,30 +79,40 @@ async def broadcast_translation(text: str, loop: asyncio.AbstractEventLoop):
     if not text.strip() or not active_listeners:
         return
 
-    # Group listeners by language so we only translate+TTS once per language
-    lang_groups: dict[str, list[WebSocket]] = {}
-    for ws, lang in list(active_listeners.items()):
-        lang_groups.setdefault(lang, []).append(ws)
+    # Group listeners by (language, voice)
+    lang_groups: dict[tuple[str, str], list[WebSocket]] = {}
+    for ws, prefs in list(active_listeners.items()):
+        lang_groups.setdefault(prefs, []).append(ws)
 
-    for lang, listeners in lang_groups.items():
+    for (lang, voice), listeners in lang_groups.items():
         try:
+            t0 = time.perf_counter()
             translated = await loop.run_in_executor(
                 None, lambda l=lang: sarvam_service.translate(text, target_language=l)
             )
+            t1 = time.perf_counter()
             if not translated:
                 print(f"⚠️ Translation to {lang} returned empty.", flush=True)
                 continue
-            print(f"✅ [{lang}] Translated: {translated}", flush=True)
+            print(f"✅ [{lang}] Translated: {translated} (Took {t1-t0:.2f}s)", flush=True)
 
+            t2 = time.perf_counter()
             audio_b64 = await loop.run_in_executor(
-                None, lambda l=lang, t=translated: sarvam_service.text_to_speech(t, target_language=l)
+                None, lambda l=lang, t=translated, v=voice: sarvam_service.text_to_speech(t, target_language=l, speaker=v)
             )
+            t3 = time.perf_counter()
             if not audio_b64:
                 print(f"⚠️ TTS for {lang} returned empty.", flush=True)
                 continue
+            print(f"🔊 [{lang}-{voice}] TTS generated (Took {t3-t2:.2f}s)", flush=True)
 
-            broadcast_msg = {"type": "audio", "audio": audio_b64, "text": translated}
-            print(f"🔊 Broadcasting [{lang}] to {len(listeners)} listener(s).", flush=True)
+            broadcast_msg = {
+                "type": "audio", 
+                "audio": audio_b64, 
+                "text": translated,
+                "latency_s": round((t1-t0) + (t3-t2), 2)
+            }
+            print(f"🚀 Broadcasting [{lang}-{voice}] to {len(listeners)} listener(s). Total API Latency: {broadcast_msg['latency_s']}s", flush=True)
 
             dead = []
             for listener in listeners:
@@ -147,15 +161,23 @@ async def websocket_speaker(
                         duration_ms = (total // 2) / 16000 * 1000
                         print(f"📡 Buffered {len(pcm_chunks)} chunks ({duration_ms:.0f}ms)", flush=True)
 
+                    # 🚨 Buffer Guard: Force flush if buffer grows too large
+                    if len(pcm_chunks) >= MAX_BUFFER_CHUNKS:
+                        print(f"⚠️ Buffer Guard triggered! {MAX_BUFFER_CHUNKS} chunks reached. Forcing processing...", flush=True)
+                        break
+
                 elif inner_msg.get("text") is not None:
                     text_data = json.loads(inner_msg["text"])
                     if text_data.get("type") == "flush":
+                        # Record flush start time
+                        flush_timestamp = time.time()
                         total_bytes = sum(len(c) for c in pcm_chunks)
                         duration_s = (total_bytes // 2) / 16000
-                        print(f"🌊 Button released. {len(pcm_chunks)} chunks, {duration_s:.1f}s of audio.", flush=True)
+                        print(f"🌊 Flush received. {len(pcm_chunks)} chunks, {duration_s:.1f}s of audio.", flush=True)
                         break
 
             # ── Transcribe using BATCH STT (streaming API is unreliable) ──
+            t_stt_start = time.perf_counter()
             print("🧠 Transcribing with Sarvam batch STT...", flush=True)
             import tempfile, os
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -180,11 +202,17 @@ async def websocket_speaker(
                 print("⚠️ No transcript from STT. Skipping.", flush=True)
                 continue
 
-            print(f"📥 Transcript: {transcript}", flush=True)
+            t_stt_end = time.perf_counter()
+            print(f"📥 Transcript: {transcript} (STT Took {t_stt_end-t_stt_start:.2f}s)", flush=True)
 
             # Echo transcript to speaker UI
             try:
-                await websocket.send_json({"type": "transcript", "text": transcript})
+                # Include a processing timestamp so the frontend can calculate total latency
+                await websocket.send_json({
+                    "type": "transcript", 
+                    "text": transcript,
+                    "flush_timestamp": inner_msg.get("timestamp", time.time() * 1000) if 'inner_msg' in locals() and inner_msg.get("text") else None
+                })
             except Exception:
                 pass
 

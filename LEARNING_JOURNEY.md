@@ -244,6 +244,26 @@ Browsers (Chrome/Safari) silently disable `navigator.mediaDevices` if the site i
 
 ---
 
+## 💎 Phase 4: Resilience & Production Polish
+
+## 🎓 Lesson 23: The Async Audio Overlap
+**Problem**: When translating rapidly, multiple audio chunks arrive at the Listener simultaneously. `new Audio().play()` triggers asynchronously, causing translations to speak over each other.
+**Solution**: The **Listener Audio Queue**. We push incoming audio to an array and use the HTML5 `onended` event to recursively trigger `playNextAudio()`. This guarantees sequential, coherent playback.
+
+## 🎓 Lesson 24: Defensive Backend Design (Buffer Guards)
+**Problem**: If the frontend VAD fails to send a `flush` signal, the backend `while True` loop will accumulate PCM chunks infinitely, leading to an Out-Of-Memory (OOM) crash.
+**Solution**: Hard limits. We implemented a `MAX_BUFFER_CHUNKS = 300` guard. If a user speaks continuously for ~15 seconds without pausing, the backend forcefully triggers processing and clears the buffer.
+
+## 🎓 Lesson 25: Tuple Grouping (Language + Voice)
+**Problem**: We grouped listeners solely by Target Language, ignoring their TTS Voice preference (Male vs Female).
+**Solution**: We upgraded our `active_listeners` dictionary to map WebSockets to a tuple: `(lang, voice)`. The backend groups by this tuple, meaning all "Marathi-Male" listeners share one API call, while "Marathi-Female" share another, perfectly balancing personalization with cost-efficiency.
+
+## 🎓 Lesson 26: Resilient WebSockets
+**Problem**: If the Wi-Fi drops for a split second, the WebSocket closes and the app silently "dies".
+**Solution**: Exponential Backoff. We wrap our WebSocket instantiation in a function that listens for `onclose`, waits a delay (1s, 2s, 4s, 8s), and attempts to reconnect automatically, keeping the UI updated with a "RECONNECTING..." status.
+
+---
+
 ## 🛡️ The R&D War Room: War Stories from the Trenches
 
 ### Phase 2 R&D Lessons: What We Discovered the Hard Way

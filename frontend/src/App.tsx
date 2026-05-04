@@ -44,44 +44,108 @@ function App() {
 
   const [targetLang, setTargetLang] = useState('mr-IN');
   const [speakerLang, setSpeakerLang] = useState('gu-IN');
+  const [voice, setVoice] = useState<'aditya' | 'anushka'>('aditya');
+  const [latency, setLatency] = useState<number | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [originalText, setOriginalText] = useState('');
   const [translatedText, setTranslatedText] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [wsStatus, setWsStatus] = useState<'connecting' | 'connected' | 'reconnecting' | 'error'>('connecting');
 
   const socketRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const isRecordingRef = useRef(false);
 
-  // ── WebSocket setup ────────────────────────────────────────────────────────
+  // ── Audio Queue Logic ──────────────────────────────────────────────────────
+  const audioQueueRef = useRef<{audioBase64: string, text: string}[]>([]);
+  const isPlayingRef = useRef(false);
+
+  const playNextAudio = () => {
+    if (audioQueueRef.current.length === 0) {
+      isPlayingRef.current = false;
+      return;
+    }
+    isPlayingRef.current = true;
+    const nextItem = audioQueueRef.current.shift();
+    if (!nextItem) return;
+
+    setTranslatedText(nextItem.text);
+    const audio = new Audio(`data:audio/wav;base64,${nextItem.audioBase64}`);
+    
+    audio.onended = () => playNextAudio();
+    audio.play().catch(e => {
+      console.error('Audio play error:', e);
+      playNextAudio();
+    });
+  };
+
+  // ── WebSocket setup with Reconnect ─────────────────────────────────────────
   useEffect(() => {
     if (role === 'selection') return;
 
-    const wsUrl = role === 'speaker'
-      ? `ws://${WS_HOST}/ws/speaker?lang=${speakerLang}`
-      : `ws://${WS_HOST}/ws/listener?lang=${targetLang}`;
+    let retryCount = 0;
+    let isComponentMounted = true;
 
-    const socket = new WebSocket(wsUrl);
-    socketRef.current = socket;
+    const connectWS = () => {
+      if (!isComponentMounted) return;
+      setWsStatus(retryCount === 0 ? 'connecting' : 'reconnecting');
 
-    socket.onopen = () => console.log('🔌 Connected to', wsUrl);
-    socket.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (data.type === 'transcript' && role === 'speaker') {
-        setOriginalText(data.text);
-      } else if (data.type === 'audio' && role === 'listener') {
-        setTranslatedText(data.text);
-        const audio = new Audio(`data:audio/wav;base64,${data.audio}`);
-        audio.play().catch(e => console.error('Audio play error:', e));
+      const wsUrl = role === 'speaker'
+        ? `ws://${WS_HOST}/ws/speaker?lang=${speakerLang}`
+        : `ws://${WS_HOST}/ws/listener?lang=${targetLang}&voice=${voice}`;
+
+      const socket = new WebSocket(wsUrl);
+      socketRef.current = socket;
+
+      socket.onopen = () => {
+        console.log('🔌 Connected to', wsUrl);
+        setWsStatus('connected');
+        retryCount = 0;
+      };
+
+      socket.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.type === 'transcript' && role === 'speaker') {
+          setOriginalText(data.text);
+          if (data.flush_timestamp) {
+             const now = Date.now();
+             setLatency((now - data.flush_timestamp) / 1000);
+          }
+        } else if (data.type === 'audio' && role === 'listener') {
+          audioQueueRef.current.push({ audioBase64: data.audio, text: data.text });
+          if (data.latency_s) setLatency(data.latency_s);
+          if (!isPlayingRef.current) {
+            playNextAudio();
+          }
+        }
+      };
+
+      socket.onclose = () => {
+        console.log('🔌 WebSocket closed');
+        if (isComponentMounted) {
+          const timeout = Math.min(1000 * Math.pow(2, retryCount), 10000);
+          retryCount++;
+          console.log(`⏳ Reconnecting in ${timeout}ms (Attempt ${retryCount})...`);
+          reconnectTimeoutRef.current = window.setTimeout(connectWS, timeout);
+        }
+      };
+    };
+
+    connectWS();
+
+    return () => {
+      isComponentMounted = false;
+      if (reconnectTimeoutRef.current) window.clearTimeout(reconnectTimeoutRef.current);
+      if (socketRef.current?.readyState === WebSocket.OPEN) {
+        socketRef.current.onclose = null;
+        socketRef.current.close();
       }
     };
-    socket.onclose = () => console.log('🔌 WebSocket closed');
-
-    return () => { if (socket.readyState === WebSocket.OPEN) socket.close(); };
-  }, [role, targetLang, speakerLang]);
+  }, [role, targetLang, speakerLang, voice]);
 
   // ── HANDS-FREE VAD LOGIC ────────────────────────────────────────────────
   const vadOptions = React.useMemo(() => ({
@@ -105,7 +169,7 @@ function App() {
       const pcm16 = floatTo16BitPCM(audio);
       if (socketRef.current?.readyState === WebSocket.OPEN) {
         socketRef.current.send(pcm16.buffer);
-        socketRef.current.send(JSON.stringify({ type: 'flush' }));
+        socketRef.current.send(JSON.stringify({ type: 'flush', timestamp: Date.now() }));
       }
       setTimeout(() => setIsProcessing(false), 5000);
     },
@@ -169,7 +233,7 @@ function App() {
     setIsProcessing(true);
 
     if (socketRef.current?.readyState === WebSocket.OPEN) {
-      socketRef.current.send(JSON.stringify({ type: 'flush' }));
+      socketRef.current.send(JSON.stringify({ type: 'flush', timestamp: Date.now() }));
     }
 
     if (processorRef.current) {
@@ -230,8 +294,11 @@ function App() {
           <section className="main-card">
             <div className="card-header">
               <div className="status">
-                <span className={`dot ${isRecording ? 'pulse' : ''}`}></span>
-                {isProcessing ? 'PROCESSING...' : isRecording ? 'LIVE' : 'READY'}
+                <span className={`dot ${isRecording ? 'pulse' : ''} ${wsStatus === 'reconnecting' ? 'reconnecting' : ''} ${wsStatus === 'error' ? 'error' : ''}`}></span>
+                {wsStatus === 'reconnecting' ? 'RECONNECTING...' : 
+                 wsStatus === 'error' ? 'OFFLINE' : 
+                 isProcessing ? 'PROCESSING...' : 
+                 isRecording ? 'LIVE' : 'READY'}
               </div>
               
               {role === 'speaker' && (
@@ -243,6 +310,11 @@ function App() {
                     <Zap size={14} /> Hands-Free
                   </button>
                 </div>
+              )}
+              {latency !== null && (
+                 <div className="latency-badge" style={{ fontSize: '0.75rem', color: '#4ade80', marginLeft: 'auto', marginRight: '1rem', border: '1px solid #4ade80', padding: '2px 8px', borderRadius: '12px' }}>
+                    Latency: ~{latency.toFixed(1)}s
+                 </div>
               )}
             </div>
 
@@ -289,7 +361,7 @@ function App() {
 
           <aside className="side-panel">
             <div className="panel-card">
-              <h4><Settings size={14} /> Settings</h4>
+              <h4><Settings size={14} /> Language</h4>
               <div className="lang-list">
                 {role === 'speaker' ? (
                   SPEAKER_LANGS.map(l => (
@@ -307,6 +379,20 @@ function App() {
                 )}
               </div>
             </div>
+
+            {role === 'listener' && (
+              <div className="panel-card">
+                <h4><Users size={14} /> Voice Preference</h4>
+                <div className="lang-list" style={{ flexDirection: 'row' }}>
+                  <button className={`lang-btn ${voice === 'aditya' ? 'active' : ''}`} style={{ flex: 1 }} onClick={() => setVoice('aditya')}>
+                    Male
+                  </button>
+                  <button className={`lang-btn ${voice === 'anushka' ? 'active' : ''}`} style={{ flex: 1 }} onClick={() => setVoice('anushka')}>
+                    Female
+                  </button>
+                </div>
+              </div>
+            )}
           </aside>
         </main>
       )}

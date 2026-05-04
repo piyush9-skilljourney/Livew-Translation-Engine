@@ -17,7 +17,8 @@ A real-time speech-to-speech translation engine for Indian languages.
 4. Live subtitles for translated audio.
 
 ## Current Status
-- [x] Research Phase Complete
-- [x] Implementation Plan Approved
-- [x] Phase 1: Base Initialization (Complete)
-- [ ] Phase 1: Core Logic Implementation (In Progress)
+- [x] Phase 1: Core AI Pipeline (REST/Batch)
+- [x] Phase 2: Push-to-Talk Broadcast (WebSockets)
+- [x] Phase 3: Hands-Free Auto-Segment (Silero VAD)
+- [x] Phase 4: Production Resilience & Polish (Queues, Latency, Voices)
+- [ ] Phase 5: Distribution & Scale (LiveKit / Multi-room) - *Future*

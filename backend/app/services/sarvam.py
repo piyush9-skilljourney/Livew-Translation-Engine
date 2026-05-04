@@ -83,18 +83,18 @@ class SarvamService:
             print(f"❌ Translation Error: {str(e)}")
             return None
 
-    def text_to_speech(self, text: str, target_language: str = "mr-IN"):
+    def text_to_speech(self, text: str, target_language: str = "mr-IN", speaker: str = "aditya"):
         """Convert text to speech using Bulbul v3."""
         if not self.client:
             return None
         
         try:
-            print(f"🔊 Calling Bulbul v3 for {target_language}...")
+            print(f"🔊 Calling Bulbul v3 for {target_language} ({speaker})...")
             response = self.client.text_to_speech.convert(
                 text=text,
                 target_language_code=target_language,
                 model="bulbul:v3",
-                speaker="aditya"
+                speaker=speaker
             )
             if hasattr(response, "audios") and response.audios:
                 return response.audios[0]

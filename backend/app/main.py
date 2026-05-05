@@ -1,26 +1,56 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
-from fastapi.middleware.cors import CORSMiddleware
-from app.core.config import settings
-from app.services.sarvam import sarvam_service
+"""
+main.py — BhashaCast FastAPI Server
+=====================================
+WebSocket endpoints for Speaker (/ws/speaker) and Listener (/ws/listener).
+Two-level cache (LRU + MongoDB) sits between STT and the broadcast pipeline
+to eliminate repeat Translate + TTS API costs (83.7% of total spend).
+
+Data Flow:
+  Speaker → PCM chunks → WAV → Saaras STT
+  → normalize → Translation Cache (L1/L2) → Sarvam Translate (on miss)
+  → TTS Cache (L1/L2) → Bulbul TTS (on miss)
+  → Broadcast JSON to all Listeners
+"""
+
 import asyncio
 import base64
-import json
 import io
+import json
+import logging
+import os
+import tempfile
+import time
 import wave
-import struct
+from contextlib import asynccontextmanager
+from typing import Optional
 
-app = FastAPI(title=settings.PROJECT_NAME)
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
-origins = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://10.179.32.64:5173", # Your network IP
-    "*", # Allow all for easier local network testing
-]
+from app.core.cache import cache_service
+from app.core.config import settings
+from app.services.sarvam import sarvam_service
+
+logger = logging.getLogger(__name__)
+
+# ── App Lifespan (startup / shutdown) ─────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("🚀 BhashaCast starting up...")
+    await cache_service.startup()
+    yield
+    logger.info("🛑 BhashaCast shutting down...")
+    await cache_service.shutdown()
+
+app = FastAPI(title=settings.PROJECT_NAME, lifespan=lifespan)
+
+# ── CORS ───────────────────────────────────────────────────────────────────────
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],   # Restrict to specific origins in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -29,92 +59,166 @@ app.add_middleware(
 from app.api.endpoints import router as translation_router
 app.include_router(translation_router, prefix="/api/v1")
 
-import time
+# ── State ──────────────────────────────────────────────────────────────────────
 
-# Store listeners as a dict: websocket → (target_language_code, voice)
+# Maps websocket → (target_language_code, voice)
 active_listeners: dict[WebSocket, tuple[str, str]] = {}
 
-MAX_BUFFER_CHUNKS = 300  # Approx 15 seconds of audio to prevent OOM
+MAX_BUFFER_CHUNKS = 300   # ~15 seconds at 16kHz/16-bit to prevent OOM
+
+# ── Audio Utilities ────────────────────────────────────────────────────────────
 
 def pcm_chunks_to_wav_b64(chunks: list[bytes], sample_rate: int = 16000) -> str:
-    """Combine all raw PCM chunks into one complete WAV file and return as base64."""
+    """Combine raw PCM chunks into a base64-encoded WAV string."""
     wav_io = io.BytesIO()
-    with wave.open(wav_io, 'wb') as wf:
+    with wave.open(wav_io, "wb") as wf:
         wf.setnchannels(1)
-        wf.setsampwidth(2)     # 16-bit PCM
+        wf.setsampwidth(2)       # 16-bit PCM
         wf.setframerate(sample_rate)
         for chunk in chunks:
             wf.writeframes(chunk)
-    return base64.b64encode(wav_io.getvalue()).decode('utf-8')
+    return base64.b64encode(wav_io.getvalue()).decode("utf-8")
 
 
-# ──────────────────────────────────────────────
-# LISTENER ENDPOINT
-# ──────────────────────────────────────────────
+def write_wav_tempfile(chunks: list[bytes], sample_rate: int = 16000) -> str:
+    """Write PCM chunks to a temp WAV file. Caller is responsible for unlinking."""
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp_path = tmp.name
+        wav_io = io.BytesIO()
+        with wave.open(wav_io, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sample_rate)
+            for chunk in chunks:
+                wf.writeframes(chunk)
+        tmp.write(wav_io.getvalue())
+    return tmp_path
+
+
+# ── Listener WebSocket ─────────────────────────────────────────────────────────
+
 @app.websocket("/ws/listener")
 async def websocket_listener(
     websocket: WebSocket,
-    lang: str = Query(default="mr-IN"),
-    voice: str = Query(default="aditya")
+    lang: str  = Query(default="mr-IN"),
+    voice: str = Query(default="aditya"),
 ):
     await websocket.accept()
     active_listeners[websocket] = (lang, voice)
-    print(f"👥 Listener Joined ({lang}, {voice}). Total: {len(active_listeners)}", flush=True)
+    logger.info(f"👥 Listener joined | lang={lang} voice={voice} | total={len(active_listeners)}")
+
     try:
         while True:
+            # Keep the connection alive; listeners only receive, never send
             await websocket.receive()
     except WebSocketDisconnect:
         active_listeners.pop(websocket, None)
-        print("🔌 Listener Disconnected", flush=True)
+        logger.info(f"🔌 Listener disconnected | remaining={len(active_listeners)}")
     except Exception as e:
         active_listeners.pop(websocket, None)
-        print(f"❌ Listener Error: {e}", flush=True)
+        logger.error(f"❌ Listener error: {e}")
 
 
-# ──────────────────────────────────────────────
-# HELPER: translate + TTS + broadcast
-# ──────────────────────────────────────────────
-async def broadcast_translation(text: str, loop: asyncio.AbstractEventLoop):
-    """For each listener, translate+TTS into their chosen language and send."""
+# ── Broadcast Pipeline (with Cache) ───────────────────────────────────────────
+
+async def broadcast_translation(text: str, src_lang: str, loop: asyncio.AbstractEventLoop, original_audio_b64: Optional[str] = None):
+    """
+    Translate text into each listener's language and broadcast the TTS audio.
+    If original_audio_b64 is provided and target_lang == src_lang, use that for zero-cost pass-through.
+    """
     if not text.strip() or not active_listeners:
         return
 
-    # Group listeners by (language, voice)
+    # Group listeners by (target_language, voice) to minimize API calls
     lang_groups: dict[tuple[str, str], list[WebSocket]] = {}
     for ws, prefs in list(active_listeners.items()):
         lang_groups.setdefault(prefs, []).append(ws)
 
-    for (lang, voice), listeners in lang_groups.items():
+    for (target_lang, voice), listeners in lang_groups.items():
         try:
-            t0 = time.perf_counter()
-            translated = await loop.run_in_executor(
-                None, lambda l=lang: sarvam_service.translate(text, target_language=l)
-            )
-            t1 = time.perf_counter()
-            if not translated:
-                print(f"⚠️ Translation to {lang} returned empty.", flush=True)
-                continue
-            print(f"✅ [{lang}] Translated: {translated} (Took {t1-t0:.2f}s)", flush=True)
+            t_start = time.perf_counter()
 
-            t2 = time.perf_counter()
-            audio_b64 = await loop.run_in_executor(
-                None, lambda l=lang, t=translated, v=voice: sarvam_service.text_to_speech(t, target_language=l, speaker=v)
-            )
-            t3 = time.perf_counter()
-            if not audio_b64:
-                print(f"⚠️ TTS for {lang} returned empty.", flush=True)
-                continue
-            print(f"🔊 [{lang}-{voice}] TTS generated (Took {t3-t2:.2f}s)", flush=True)
+            # ── Optimization: Same-Language Skip (Original Audio Pass-through) ────────
+            if target_lang.strip().lower() == src_lang.strip().lower():
+                logger.info(f"[Pipeline] PASS-THROUGH for {target_lang} (Source == Target)")
+                broadcast_msg = {
+                    "type":              "audio",
+                    "audio":             original_audio_b64, # Use real speaker voice!
+                    "text":              text,
+                    "latency_s":         0,
+                    "translate_cached":  True,
+                    "tts_cached":        True,
+                }
+                dead: list[WebSocket] = []
+                for listener in listeners:
+                    try:
+                        await listener.send_json(broadcast_msg)
+                    except:
+                        dead.append(listener)
+                for d in dead:
+                    active_listeners.pop(d, None)
+                continue # Skip to next language group
 
+            # ── Step 1: Translation (cache-first) ─────────────────────────────
+
+            translated: Optional[str] = await cache_service.get_translation(text, src_lang, target_lang)
+            translate_cached = translated is not None
+
+            if not translate_cached:
+                t0 = time.perf_counter()
+                translated = await loop.run_in_executor(
+                    None,
+                    lambda l=target_lang: sarvam_service.translate(text, target_language=l, source_language=src_lang),
+                )
+                t1 = time.perf_counter()
+                if not translated:
+                    logger.warning(f"[Translate] Empty result for {target_lang}")
+                    continue
+                await cache_service.set_translation(text, src_lang, target_lang, translated)
+                logger.info(f"[Translate] MISS → API call ({t1-t0:.2f}s) | {target_lang}: {translated[:60]}")
+            else:
+                logger.info(f"[Translate] HIT  → cache | {target_lang}: {translated[:60]}")
+
+            # ── Step 2: TTS (cache-first) ──────────────────────────────────────
+            audio_b64: Optional[str] = await cache_service.get_tts(translated, target_lang, voice)
+            tts_cached = audio_b64 is not None
+
+            if not tts_cached:
+                t2 = time.perf_counter()
+                audio_b64 = await loop.run_in_executor(
+                    None,
+                    lambda l=target_lang, t=translated, v=voice: sarvam_service.text_to_speech(t, target_language=l, speaker=v),
+                )
+                t3 = time.perf_counter()
+                if not audio_b64:
+                    logger.warning(f"[TTS] Empty result for {target_lang}-{voice}")
+                    continue
+                await cache_service.set_tts(translated, target_lang, voice, audio_b64)
+                logger.info(f"[TTS] MISS → API call ({t3-t2:.2f}s) | {target_lang}-{voice}")
+            else:
+                logger.info(f"[TTS] HIT  → cache | {target_lang}-{voice}")
+
+            t_end = time.perf_counter()
+            total_latency = round(t_end - t_start, 3)
+
+            # ── Step 3: Broadcast ──────────────────────────────────────────────
             broadcast_msg = {
-                "type": "audio", 
-                "audio": audio_b64, 
-                "text": translated,
-                "latency_s": round((t1-t0) + (t3-t2), 2)
+                "type":              "audio",
+                "audio":             audio_b64,
+                "text":              translated,
+                "latency_s":         total_latency,
+                "translate_cached":  translate_cached,
+                "tts_cached":        tts_cached,
             }
-            print(f"🚀 Broadcasting [{lang}-{voice}] to {len(listeners)} listener(s). Total API Latency: {broadcast_msg['latency_s']}s", flush=True)
 
-            dead = []
+            logger.info(
+                f"🚀 Broadcasting to {len(listeners)} listener(s) | {target_lang}-{voice} "
+                f"| latency={total_latency}s "
+                f"| translate={'HIT' if translate_cached else 'MISS'} "
+                f"| tts={'HIT' if tts_cached else 'MISS'}"
+            )
+
+            dead: list[WebSocket] = []
             for listener in listeners:
                 try:
                     await listener.send_json(broadcast_msg)
@@ -124,110 +228,170 @@ async def broadcast_translation(text: str, loop: asyncio.AbstractEventLoop):
                 active_listeners.pop(d, None)
 
         except Exception as e:
-            print(f"❌ Broadcast Error [{lang}]: {e}", flush=True)
+            logger.error(f"❌ Broadcast error [{target_lang}]: {e}", exc_info=True)
 
 
-# ──────────────────────────────────────────────
-# SPEAKER ENDPOINT
-# ──────────────────────────────────────────────
+# ── Speaker WebSocket ──────────────────────────────────────────────────────────
+
 @app.websocket("/ws/speaker")
 async def websocket_speaker(
     websocket: WebSocket,
-    lang: str = Query(default="hi-IN")
+    lang: str = Query(default="hi-IN"),
 ):
     await websocket.accept()
-    print(f"🎤 Speaker Connected ({lang})", flush=True)
+    logger.info(f"🎤 Speaker connected | src_lang={lang}")
     loop = asyncio.get_event_loop()
 
     try:
         while True:
-            # ── Wait for first PCM chunk (microphone button pressed) ──
+            # ── Wait for first PCM chunk ───────────────────────────────────────
             message = await websocket.receive()
             if message.get("bytes") is None:
                 continue
 
-            print("🎤 Speaker pressed button. Collecting audio...", flush=True)
-            pcm_chunks: list[bytes] = []
-            pcm_chunks.append(message["bytes"])
+            logger.info("🎤 Speaker started speaking — collecting audio chunks...")
+            pcm_chunks: list[bytes] = [message["bytes"]]
+            flush_timestamp: Optional[float] = None
 
-            # ── Inner loop: collect chunks until button released ──
+            # ── Inner loop: collect chunks until flush signal ──────────────────
             while True:
                 inner_msg = await websocket.receive()
 
                 if inner_msg.get("bytes") is not None:
                     pcm_chunks.append(inner_msg["bytes"])
-                    total = sum(len(c) for c in pcm_chunks)
-                    if len(pcm_chunks) % 4 == 0:
-                        duration_ms = (total // 2) / 16000 * 1000
-                        print(f"📡 Buffered {len(pcm_chunks)} chunks ({duration_ms:.0f}ms)", flush=True)
+                    total_bytes = sum(len(c) for c in pcm_chunks)
 
-                    # 🚨 Buffer Guard: Force flush if buffer grows too large
+                    if len(pcm_chunks) % 8 == 0:
+                        duration_ms = (total_bytes // 2) / 16000 * 1000
+                        logger.debug(f"📡 Buffered {len(pcm_chunks)} chunks ({duration_ms:.0f}ms)")
+
+                    # Buffer guard: prevent OOM on very long speeches
                     if len(pcm_chunks) >= MAX_BUFFER_CHUNKS:
-                        print(f"⚠️ Buffer Guard triggered! {MAX_BUFFER_CHUNKS} chunks reached. Forcing processing...", flush=True)
+                        logger.warning(f"⚠️ Buffer guard triggered at {MAX_BUFFER_CHUNKS} chunks — forcing flush")
                         break
+
 
                 elif inner_msg.get("text") is not None:
-                    text_data = json.loads(inner_msg["text"])
-                    if text_data.get("type") == "flush":
-                        # Record flush start time
-                        flush_timestamp = time.time()
-                        total_bytes = sum(len(c) for c in pcm_chunks)
-                        duration_s = (total_bytes // 2) / 16000
-                        print(f"🌊 Flush received. {len(pcm_chunks)} chunks, {duration_s:.1f}s of audio.", flush=True)
-                        break
+                    try:
+                        text_data = json.loads(inner_msg["text"])
+                        if text_data.get("type") == "flush":
+                            flush_timestamp = text_data.get("timestamp")
+                            total_bytes = sum(len(c) for c in pcm_chunks)
+                            duration_s = (total_bytes // 2) / 16000
+                            logger.info(f"🌊 Flush received | {len(pcm_chunks)} chunks | {duration_s:.1f}s of audio")
+                            break
+                    except json.JSONDecodeError:
+                        logger.warning("Received malformed text frame — ignoring")
 
-            # ── Transcribe using BATCH STT (streaming API is unreliable) ──
+            if not pcm_chunks:
+                logger.warning("No audio chunks collected — skipping transcription")
+                continue
+
+            # ── Transcribe ─────────────────────────────────────────────────────
             t_stt_start = time.perf_counter()
-            print("🧠 Transcribing with Sarvam batch STT...", flush=True)
-            import tempfile, os
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                tmp_path = tmp.name
-                wav_io = io.BytesIO()
-                with wave.open(wav_io, 'wb') as wf:
-                    wf.setnchannels(1)
-                    wf.setsampwidth(2)
-                    wf.setframerate(16000)
-                    for chunk in pcm_chunks:
-                        wf.writeframes(chunk)
-                tmp.write(wav_io.getvalue())
-
+            tmp_path = write_wav_tempfile(pcm_chunks)
             try:
                 transcript = await loop.run_in_executor(
-                    None, lambda l=lang: sarvam_service.transcribe(tmp_path, language_code=l)
+                    None,
+                    lambda: sarvam_service.transcribe(tmp_path, language_code=lang),
                 )
             finally:
-                os.unlink(tmp_path)
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
 
-            if not transcript:
-                print("⚠️ No transcript from STT. Skipping.", flush=True)
+            if not transcript or not transcript.strip():
+                logger.warning("⚠️ Empty transcript from STT — skipping")
                 continue
 
             t_stt_end = time.perf_counter()
-            print(f"📥 Transcript: {transcript} (STT Took {t_stt_end-t_stt_start:.2f}s)", flush=True)
+            logger.info(f"📥 Transcript: '{transcript}' | STT took {t_stt_end - t_stt_start:.2f}s")
 
-            # Echo transcript to speaker UI
+            # ── Echo transcript back to speaker UI ─────────────────────────────
             try:
-                # Include a processing timestamp so the frontend can calculate total latency
                 await websocket.send_json({
-                    "type": "transcript", 
-                    "text": transcript,
-                    "flush_timestamp": inner_msg.get("timestamp", time.time() * 1000) if 'inner_msg' in locals() and inner_msg.get("text") else None
+                    "type":            "transcript",
+                    "text":            transcript,
+                    "flush_timestamp": flush_timestamp,
                 })
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to echo transcript to speaker: {e}")
 
-            # Broadcast translation to all listeners
-            asyncio.create_task(broadcast_translation(transcript, loop))
+            # ── Transcript & Audio Coalescing Logic ───────────────────────────
+            if not hasattr(websocket, "coalesce_buffer"):
+                websocket.coalesce_buffer = [] # List of (transcript, pcm_bytes)
+                websocket.coalesce_lock = asyncio.Lock()
+
+            async def delayed_broadcast():
+                start_time = time.time()
+                while time.time() - start_time < 2.0:
+                    await asyncio.sleep(0.1)
+                    async with websocket.coalesce_lock:
+                        if not websocket.coalesce_buffer:
+                            return
+                        last_text = websocket.coalesce_buffer[-1][0].strip()
+                        if last_text and last_text[-1] in ".?!":
+                            break
+                
+                async with websocket.coalesce_lock:
+                    if websocket.coalesce_buffer:
+                        # Merge text and audio
+                        merged_text = " ".join([item[0] for item in websocket.coalesce_buffer])
+                        all_pcm = b"".join([item[1] for item in websocket.coalesce_buffer])
+                        websocket.coalesce_buffer.clear()
+
+                        # Convert merged PCM to base64 WAV for pass-through
+                        import io, wave, base64
+                        with io.BytesIO() as wav_io:
+                            with wave.open(wav_io, 'wb') as wav_file:
+                                wav_file.setnchannels(1)
+                                wav_file.setsampwidth(2) # 16-bit
+                                wav_file.setframerate(16000)
+                                wav_file.writeframes(all_pcm)
+                            original_audio_b64 = base64.b64encode(wav_io.getvalue()).decode('utf-8')
+
+                        asyncio.create_task(broadcast_translation(merged_text, lang, loop, original_audio_b64))
+                        logger.info(f"🌊 Coalesced PASS-THROUGH broadcast: '{merged_text[:50]}...'")
+
+            async with websocket.coalesce_lock:
+                # Store both the transcript and the raw pcm data we just processed
+                raw_pcm = b"".join(pcm_chunks)
+                websocket.coalesce_buffer.append((transcript, raw_pcm))
+                if len(websocket.coalesce_buffer) == 1:
+                    asyncio.create_task(delayed_broadcast())
+
 
     except WebSocketDisconnect:
-        print("🔌 Speaker Disconnected", flush=True)
+        logger.info("🔌 Speaker disconnected")
     except Exception as e:
-        print(f"❌ Speaker Global Error: {e}", flush=True)
+        logger.error(f"❌ Speaker global error: {e}", exc_info=True)
 
 
-@app.get("/")
+# ── Health & Cache API Endpoints ──────────────────────────────────────────────
+
+@app.get("/", tags=["Health"])
 async def root():
-    return {"message": "Live Translation Engine API is running"}
+    return {
+        "status": "running",
+        "service": settings.PROJECT_NAME,
+        "active_listeners": len(active_listeners),
+    }
+
+
+@app.get("/api/v1/cache/metrics", tags=["Cache"])
+async def get_cache_metrics():
+    """Returns cache hit/miss stats and estimated API cost saved."""
+    return JSONResponse(content=cache_service.metrics.to_dict())
+
+
+@app.delete("/api/v1/cache", tags=["Cache"])
+async def purge_cache(lang: Optional[str] = Query(default=None, description="Language code e.g. 'mr-IN'. Omit to purge all.")):
+    """
+    Manually invalidate the translation and TTS caches.
+    Use after a Sarvam model upgrade or when stale audio is detected.
+    """
+    result = await cache_service.purge(lang=lang)
+    return JSONResponse(content={"purged": result})
+
 
 if __name__ == "__main__":
     import uvicorn

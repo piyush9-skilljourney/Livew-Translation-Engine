@@ -216,6 +216,7 @@ You speak for 5 seconds → STOP → Send audio file → Wait 1.5s → Get trans
 ```
 Like writing an email, sending it, and waiting for a reply.
 
+
 **Streaming STT (Future Goal):**
 ```
 You speak → 200ms → partial transcript → 200ms → updated transcript → ...
@@ -305,5 +306,163 @@ await sarvam_ws.transcribe(audio)                          # ✅ then send
 **Problem**: The AI server hung up on us (Code 1000) before we even started talking.
 **Lesson**: Servers often have a "Silence Timeout." We learned to wait for the **first audio chunk** before opening the AI pipe.
 
----
 **You have built a real working product. Phase 3 takes it from "impressive demo" to "production-ready live translation platform."**
+
+---
+
+## 💰 Phase 5: Cost Optimization (The Cache Layer)
+
+## 🎓 Lesson 27: Why Caching is the Most Important Engineering Skill
+
+You have an API that costs ₹2.00 per 1000 characters of translation. Every time a speaker says *"Thank you"*, you pay ₹0.10. If they say it 200 times in a day, you pay ₹20 — for the exact same sentence.
+
+**The Insight**: A computer's memory (RAM) is approximately **100,000 times faster** than a network API call. By saving the answer the first time, every repeat lookup is essentially **free and instant**.
+
+This is not an optimization — it is a fundamental building block of every scalable system in the world. Google, Netflix, Uber — they all run massive cache layers for exactly this reason.
+
+## 🎓 Lesson 28: Cache Key Design (Why it Matters So Much)
+
+A cache key is like a file name. If two different files have the same name, one overwrites the other. If the same file has two different names, you store it twice.
+
+### Mistake: Too Broad
+```python
+key = text  # "Hello" and "hello!" are different keys → miss for same phrase
+```
+
+### Mistake: Too Narrow
+```python
+key = text + lang  # "hello" → Marathi could return a Male voice for a Female listener
+```
+
+### Our Design: Exactly Right
+```python
+# Translation key — voice doesn't matter here
+key = SHA-256(normalize(text) + src_lang + target_lang)
+
+# TTS key — voice is critical here (Male 'aditya' ≠ Female 'ritu')
+key = SHA-256(translated_text + target_lang + voice)
+```
+
+**The `SHA-256` hash** converts a long string into a fixed 64-character ID. This means your database index is always the same size, no matter how long the text is.
+
+## 🎓 Lesson 29: Text Normalization (The Hidden Problem)
+
+Your users won't always say things the same way:
+- *"Hello everyone"*
+- *"Hello everyone!"*
+- *"  hello everyone  "*
+
+Without normalization, these are 3 different cache entries. With it, they all collapse to `"hello everyone"` — one entry, 3 cache hits.
+
+**Our normalization pipeline** (order matters):
+```python
+text.lower()                           # "Hello!!" → "hello!!"
+.strip()                               # "  hello!!  " → "hello!!"
+re.sub(r"[^\w\s]", "", text)           # "hello!!" → "hello"
+re.sub(r"\s+", " ", text).strip()      # "hello  world" → "hello world"
+```
+
+**Real-world impact**: A speaker saying *"Thank you very much"* with different punctuation, spacing, or capitalization will always resolve to `"thank you very much"` → **cache hit every time**.
+
+## 🎓 Lesson 30: The LRU Policy (Least Recently Used)
+
+RAM is finite. You can't cache everything forever. The **LRU Policy** solves this:
+
+```
+Cache has 3 slots. Items: A → B → C (C is most recent)
+
+New item D arrives. Cache is full.
+LRU evicts A (it was used the longest time ago).
+
+Result: B → C → D
+```
+
+This is smart because it assumes: **"If you haven't used it recently, you probably won't need it soon."** For a live translation engine where speakers talk about the same topic for the duration of a session, this is an excellent assumption.
+
+We use `cachetools.LRUCache` over Python's built-in `functools.lru_cache` because it is **size-bounded by item count** and thread-safe.
+
+## 🎓 Lesson 31: Two-Level Caching (RAM + Database)
+
+| Level | Technology | Speed | Persistence | Size Limit |
+|---|---|---|---|---|
+| L1 | `LRUCache` (RAM) | ~0.001ms | ❌ Lost on restart | 512 / 128 items |
+| L2 | MongoDB (`motor`) | ~5–20ms | ✅ Survives restart | TTL-managed |
+
+**The lookup order always goes L1 → L2 → API:**
+1. Check RAM first — if HIT, return in 0.001ms.
+2. If L1 miss, check MongoDB — if HIT, warm L1 (so next request hits L1) and return.
+3. If L2 miss, call the Sarvam API, pay the cost, write to both levels.
+
+**The "warm L1" step** is critical. If you found something in MongoDB, you load it into RAM so the *next* request is even faster.
+
+## 🎓 Lesson 32: Async Database Access in FastAPI
+
+A dangerous beginner mistake: using a *synchronous* database driver inside an `async def` function.
+
+```python
+# ❌ BAD — blocks the entire event loop while MongoDB responds
+doc = sync_mongo_client.find_one({"_id": key})
+
+# ✅ GOOD — awaits asynchronously, event loop stays free
+doc = await async_motor_client.find_one({"_id": key})
+```
+
+We use **`motor`** (MongoDB's official async driver) so cache reads/writes never freeze your WebSocket connections. This is what makes Phase 5 compatible with FastAPI's async architecture.
+
+## 🎓 Lesson 33: TTL Indexes (Auto-Expiring Data)
+
+In MongoDB, a **TTL (Time-To-Live) Index** is a special index that automatically deletes documents after a set time. You never have to write a cron job to clean up old data.
+
+```python
+# Create a TTL index — documents with 'expires_at' in the past are deleted automatically
+await db["translation_cache"].create_index("expires_at", expireAfterSeconds=0)
+```
+
+When you write a document, you set:
+```python
+"expires_at": datetime.now(utc) + timedelta(days=7)
+```
+
+MongoDB's background process runs every 60 seconds and purges expired entries. Your cache self-maintains with zero operational overhead.
+
+## 🎓 Lesson 34: Size Guards (Preventing Cache Bloat)
+
+Not everything should be cached. Our guards:
+
+1. **Text length > 200 chars**: Long speeches are unlikely to repeat verbatim. Skip caching.
+2. **TTS audio > 100KB base64**: Large audio files would bloat MongoDB quickly. Skip caching.
+
+These guards protect your database from growing unbounded while still caching the most valuable items: short, repeatable phrases.
+
+## 🎓 Lesson 35: The Metrics Mindset
+
+We added `CacheMetrics` to track:
+- **Hit rate** = Hits / (Hits + Misses) — higher is better
+- **Estimated ₹ saved** — visible at `GET /api/v1/cache/metrics`
+
+**Why this matters**: You can't improve what you don't measure. By exposing metrics via an API endpoint, you can demo the cost savings live, justify the engineering investment, and tune the cache policies (TTL, LRU size) based on real data.
+
+---
+**Phase 5 is complete. The engine now gets smarter and cheaper every time it runs.**
+
+---
+
+## 🚀 Phase 6: Advanced Pipeline Optimization
+
+## 🎓 Lesson 36: Transcript Coalescing (The "Human Pause" Buffer)
+**Problem**: Speakers often talk in short bursts ("Hello", "pause", "Welcome", "pause"). Each burst triggers a separate TTS call, costing money and sounding robotic.
+**Solution**: We added a **1.2s Coalescing Buffer**. The backend waits slightly after the first transcript arrives. If more text arrives during that wait, it merges them into one sentence. 
+- **Impact**: Reduces total TTS calls by 30-40% while making the spoken output sound more natural.
+
+## 🎓 Lesson 37: Same-Language Skip Logic
+**Problem**: If a speaker is English and a listener chooses English, we were still paying for STT → Translate → TTS.
+**Solution**: A simple identity check (`source == target`). We bypass the heavy AI pipeline and send the text directly.
+- **Impact**: 100% cost reduction for same-language listeners.
+
+## 🎓 Lesson 38: Tiered Persistence (L2 Strategy)
+**Problem**: One-off long paragraphs (200+ chars) were bloating MongoDB but almost never being reused. 
+**Solution**: **Smart Tiering**.
+1. **Short (< 8 chars)**: Never cache (filler words).
+2. **Medium (< 150 chars)**: High reuse, cache immediately.
+3. **Long (150-400 chars)**: Cache to MongoDB **only on the second hit**. We use an in-memory `hit_tracker` to decide if a long string is "worth" the database space.
+4. **Huge (> 400 chars)**: Never cache (too unique).

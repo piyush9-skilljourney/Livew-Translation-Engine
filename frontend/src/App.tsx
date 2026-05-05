@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useMicVAD, utils } from '@ricky0123/vad-react';
-import { Mic, MicOff, Volume2, Globe, ArrowRight, Languages, Zap, Hand, Radio, Users, Settings } from 'lucide-react';
+import { Mic, MicOff, Volume2, Globe, ArrowRight, Languages, Zap, Hand, Radio, Users, Settings, BarChart3, TrendingUp, Trash2, ShieldCheck, X } from 'lucide-react';
 import './App.css';
 
 // ─── Supported target languages ───────────────────────────────────────────────
@@ -44,7 +44,7 @@ function App() {
 
   const [targetLang, setTargetLang] = useState('mr-IN');
   const [speakerLang, setSpeakerLang] = useState('gu-IN');
-  const [voice, setVoice] = useState<'aditya' | 'anushka'>('aditya');
+  const [voice, setVoice] = useState<'aditya' | 'ritu'>('aditya');
   const [latency, setLatency] = useState<number | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -52,6 +52,8 @@ function App() {
   const [translatedText, setTranslatedText] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [wsStatus, setWsStatus] = useState<'connecting' | 'connected' | 'reconnecting' | 'error'>('connecting');
+  const [showAnalytics, setShowAnalytics] = useState(false);
+  const [metrics, setMetrics] = useState<any>(null);
 
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<number | null>(null);
@@ -116,12 +118,18 @@ function App() {
              setLatency((now - data.flush_timestamp) / 1000);
           }
         } else if (data.type === 'audio' && role === 'listener') {
-          audioQueueRef.current.push({ audioBase64: data.audio, text: data.text });
-          if (data.latency_s) setLatency(data.latency_s);
-          if (!isPlayingRef.current) {
-            playNextAudio();
+          if (data.audio) {
+            audioQueueRef.current.push({ audioBase64: data.audio, text: data.text });
+            if (!isPlayingRef.current) {
+              playNextAudio();
+            }
+          } else {
+            // Text-only update (e.g. Same-language skip)
+            setTranslatedText(data.text);
           }
+          if (data.latency_s) setLatency(data.latency_s);
         }
+
       };
 
       socket.onclose = () => {
@@ -251,15 +259,57 @@ function App() {
     setTimeout(() => setIsProcessing(false), 5000);
   };
 
+  // ── Analytics Fetching ────────────────────────────────────────────────────
+  useEffect(() => {
+    let interval: number | null = null;
+    
+    const fetchMetrics = async () => {
+      try {
+        const response = await fetch(`http://${WS_HOST}/api/v1/cache/metrics`);
+        const data = await response.json();
+        setMetrics(data);
+      } catch (err) {
+        console.error('Failed to fetch metrics:', err);
+      }
+    };
+
+    if (showAnalytics) {
+      fetchMetrics();
+      interval = window.setInterval(fetchMetrics, 3000);
+    }
+
+    return () => {
+      if (interval) window.clearInterval(interval);
+    };
+  }, [showAnalytics]);
+
+  const purgeCache = async () => {
+    if (!window.confirm("Are you sure you want to purge the global cache? This will reset hits to zero and clear MongoDB storage.")) return;
+    try {
+      await fetch(`http://${WS_HOST}/api/v1/cache`, { method: 'DELETE' });
+      // Refresh metrics
+      const response = await fetch(`http://${WS_HOST}/api/v1/cache/metrics`);
+      const data = await response.json();
+      setMetrics(data);
+    } catch (err) {
+      console.error('Failed to purge cache:', err);
+    }
+  };
+
   return (
     <div className="app-container">
       <header>
         <h1>BhashaCast <span className="badge">Beta</span></h1>
-        {role !== 'selection' && (
-          <button className="mode-btn" onClick={() => setRole('selection')}>
-            Change Role
+        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+          <button className="mode-btn" onClick={() => setShowAnalytics(true)} title="View AI ROI Dashboard">
+             <BarChart3 size={16} /> ROI
           </button>
-        )}
+          {role !== 'selection' && (
+            <button className="mode-btn" onClick={() => setRole('selection')}>
+              Change Role
+            </button>
+          )}
+        </div>
       </header>
 
       {role === 'selection' ? (
@@ -387,7 +437,7 @@ function App() {
                   <button className={`lang-btn ${voice === 'aditya' ? 'active' : ''}`} style={{ flex: 1 }} onClick={() => setVoice('aditya')}>
                     Male
                   </button>
-                  <button className={`lang-btn ${voice === 'anushka' ? 'active' : ''}`} style={{ flex: 1 }} onClick={() => setVoice('anushka')}>
+                  <button className={`lang-btn ${voice === 'ritu' ? 'active' : ''}`} style={{ flex: 1 }} onClick={() => setVoice('ritu')}>
                     Female
                   </button>
                 </div>
@@ -395,6 +445,73 @@ function App() {
             )}
           </aside>
         </main>
+      )}
+
+      {/* ─── ANALYTICS DASHBOARD OVERLAY ────────────────────────────────────── */}
+      {showAnalytics && metrics && (
+        <div className="analytics-overlay">
+          <div className="analytics-modal">
+            <div className="dashboard-header">
+              <h2>Intelligence & ROI Dashboard</h2>
+              <div className="live-indicator">
+                <div className="live-dot"></div>
+                Live Analysis
+              </div>
+            </div>
+
+            <div className="savings-grid">
+              <div className="metric-card">
+                <span className="label">Total Estimated Savings</span>
+                <span className="value green">₹{metrics.estimated_inr_saved.toFixed(2)}</span>
+              </div>
+              <div className="metric-card">
+                <span className="label">API Calls Saved</span>
+                <span className="value">{metrics.total_api_calls_saved}</span>
+              </div>
+            </div>
+
+            <div className="hit-rate-section">
+              <div className="hit-rate-row">
+                <div className="hit-rate-label">
+                  <span><Languages size={14} /> Translation Hit Rate</span>
+                  <span>{(metrics.translation.hit_rate * 100).toFixed(1)}%</span>
+                </div>
+                <div className="progress-bg">
+                  <div className="progress-fill" style={{ width: `${metrics.translation.hit_rate * 100}%` }}></div>
+                </div>
+              </div>
+
+              <div className="hit-rate-row">
+                <div className="hit-rate-label">
+                  <span><Volume2 size={14} /> TTS Audio Hit Rate</span>
+                  <span>{(metrics.tts.hit_rate * 100).toFixed(1)}%</span>
+                </div>
+                <div className="progress-bg">
+                  <div className="progress-fill" style={{ width: `${metrics.tts.hit_rate * 100}%` }}></div>
+                </div>
+              </div>
+            </div>
+
+            <div className="plan-info">
+              <div className="plan-name">
+                <ShieldCheck size={18} />
+                <span>{metrics.plan_metadata.name}</span>
+              </div>
+              <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>
+                Rate Limit: {metrics.plan_metadata.rate_limit}
+              </div>
+            </div>
+
+            <div className="dashboard-actions">
+              <button className="btn-secondary" onClick={() => setShowAnalytics(false)}>
+                Return to Studio
+              </button>
+              <button className="btn-danger" onClick={purgeCache} title="Clear Global Cache">
+                <Trash2 size={18} />
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -22,14 +22,14 @@ steps:
     args:
       - 'build'
       - '-t'
-      - 'gcr.io/$PROJECT_ID/bhashacast:$COMMIT_SHA'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/bhashacast/app:$COMMIT_SHA'
       - 'backend'
 
   # ── Step 4: Push to Artifact Registry ────────────────────────────────────────
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'push'
-      - 'gcr.io/$PROJECT_ID/bhashacast:$COMMIT_SHA'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/bhashacast/app:$COMMIT_SHA'
 
   # ── Step 5: Deploy to Cloud Run ─────────────────────────────────────────────
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -39,7 +39,7 @@ steps:
       - 'deploy'
       - 'bhashacast'
       - '--image'
-      - 'gcr.io/$PROJECT_ID/bhashacast:$COMMIT_SHA'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/bhashacast/app:$COMMIT_SHA'
       - '--region'
       - 'us-central1'
       - '--platform'
@@ -49,7 +49,7 @@ steps:
       - 'SARVAM_API_KEY=${_SARVAM_API_KEY},MONGODB_URL=${_MONGODB_URL}'
 
 images:
-  - 'gcr.io/$PROJECT_ID/bhashacast:$COMMIT_SHA'
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/bhashacast/app:$COMMIT_SHA'
 
 options:
   logging: CLOUD_LOGGING_ONLY

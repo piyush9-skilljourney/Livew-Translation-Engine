@@ -52,4 +52,4 @@ images:
   - 'gcr.io/$PROJECT_ID/bhashacast:$COMMIT_SHA'
 
 options:
-  logging: CLOUD_LOGGING
+  logging: CLOUD_LOGGING_ONLY

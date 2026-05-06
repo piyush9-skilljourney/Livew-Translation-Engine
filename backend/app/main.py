@@ -24,9 +24,10 @@ import wave
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.core.cache import cache_service
 from app.core.config import settings
@@ -55,6 +56,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def add_process_time_header(request, call_next):
+    response = await call_next(request)
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    response.headers["Cross-Origin-Embedder-Policy"] = "require-corp"
+    return response
+
 
 from app.api.endpoints import router as translation_router
 app.include_router(translation_router, prefix="/api/v1")
@@ -349,8 +358,11 @@ async def websocket_speaker(
                                 wav_file.writeframes(all_pcm)
                             original_audio_b64 = base64.b64encode(wav_io.getvalue()).decode('utf-8')
 
-                        asyncio.create_task(broadcast_translation(merged_text, lang, loop, original_audio_b64))
-                        logger.info(f"🌊 Coalesced PASS-THROUGH broadcast: '{merged_text[:50]}...'")
+                        if merged_text.strip():
+                            asyncio.create_task(broadcast_translation(merged_text, lang, loop, original_audio_b64))
+                            logger.info(f"🌊 Coalesced PASS-THROUGH broadcast: '{merged_text[:50]}...'")
+                        else:
+                            logger.warning("⚠️ Coalesced text was empty — skipping broadcast")
 
             async with websocket.coalesce_lock:
                 # Store both the transcript and the raw pcm data we just processed
@@ -368,8 +380,8 @@ async def websocket_speaker(
 
 # ── Health & Cache API Endpoints ──────────────────────────────────────────────
 
-@app.get("/", tags=["Health"])
-async def root():
+@app.get("/api/health", tags=["Health"])
+async def health_check():
     return {
         "status": "running",
         "service": settings.PROJECT_NAME,
@@ -396,3 +408,9 @@ async def purge_cache(lang: Optional[str] = Query(default=None, description="Lan
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+
+# ── Static Files (React Frontend) ──────────────────────────────────────────
+# IMPORTANT: This MUST be the last route defined so it doesn't intercept APIs
+static_path = os.path.join(os.getcwd(), "static")
+if os.path.exists(static_path):
+    app.mount("/", StaticFiles(directory="static", html=True), name="static")

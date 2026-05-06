@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { useMicVAD, utils } from '@ricky0123/vad-react';
-import { Mic, MicOff, Volume2, Globe, ArrowRight, Languages, Zap, Hand, Radio, Users, Settings, BarChart3, TrendingUp, Trash2, ShieldCheck, X } from 'lucide-react';
+import { useMicVAD } from '@ricky0123/vad-react';
+import { Mic, MicOff, Volume2, ArrowRight, Languages, Zap, Hand, Radio, Users, Settings, BarChart3, Trash2, ShieldCheck } from 'lucide-react';
 import './App.css';
 
 // ─── Supported target languages ───────────────────────────────────────────────
@@ -34,7 +34,9 @@ const floatTo16BitPCM = (input: Float32Array): Int16Array => {
   return pcm16;
 };
 
-const WS_HOST = window.location.hostname === 'localhost' ? 'localhost:8000' : `${window.location.hostname}:8000`;
+const WS_PROTOCOL = window.location.protocol === 'https:' ? 'wss' : 'ws';
+const WS_HOST = window.location.hostname === 'localhost' ? 'localhost:8000' : window.location.host;
+const API_BASE = window.location.hostname === 'localhost' ? 'http://localhost:8000' : '';
 
 function App() {
   const [role, setRole] = useState<'selection' | 'speaker' | 'listener'>('selection');
@@ -97,8 +99,8 @@ function App() {
       setWsStatus(retryCount === 0 ? 'connecting' : 'reconnecting');
 
       const wsUrl = role === 'speaker'
-        ? `ws://${WS_HOST}/ws/speaker?lang=${speakerLang}`
-        : `ws://${WS_HOST}/ws/listener?lang=${targetLang}&voice=${voice}`;
+        ? `${WS_PROTOCOL}://${WS_HOST}/ws/speaker?lang=${speakerLang}`
+        : `${WS_PROTOCOL}://${WS_HOST}/ws/listener?lang=${targetLang}&voice=${voice}`;
 
       const socket = new WebSocket(wsUrl);
       socketRef.current = socket;
@@ -176,7 +178,7 @@ function App() {
       setIsProcessing(true);
       const pcm16 = floatTo16BitPCM(audio);
       if (socketRef.current?.readyState === WebSocket.OPEN) {
-        socketRef.current.send(pcm16.buffer);
+        socketRef.current.send(pcm16 as any);
         socketRef.current.send(JSON.stringify({ type: 'flush', timestamp: Date.now() }));
       }
       setTimeout(() => setIsProcessing(false), 5000);
@@ -222,7 +224,7 @@ function App() {
         const inputData = e.inputBuffer.getChannelData(0);
         const pcm16 = floatTo16BitPCM(inputData);
         if (socketRef.current?.readyState === WebSocket.OPEN) {
-          socketRef.current.send(pcm16.buffer);
+          socketRef.current.send(pcm16 as any);
         }
       };
 
@@ -265,7 +267,7 @@ function App() {
     
     const fetchMetrics = async () => {
       try {
-        const response = await fetch(`http://${WS_HOST}/api/v1/cache/metrics`);
+        const response = await fetch(`${API_BASE}/api/v1/cache/metrics`);
         const data = await response.json();
         setMetrics(data);
       } catch (err) {
@@ -286,9 +288,9 @@ function App() {
   const purgeCache = async () => {
     if (!window.confirm("Are you sure you want to purge the global cache? This will reset hits to zero and clear MongoDB storage.")) return;
     try {
-      await fetch(`http://${WS_HOST}/api/v1/cache`, { method: 'DELETE' });
+      await fetch(`${API_BASE}/api/v1/cache`, { method: 'DELETE' });
       // Refresh metrics
-      const response = await fetch(`http://${WS_HOST}/api/v1/cache/metrics`);
+      const response = await fetch(`${API_BASE}/api/v1/cache/metrics`);
       const data = await response.json();
       setMetrics(data);
     } catch (err) {

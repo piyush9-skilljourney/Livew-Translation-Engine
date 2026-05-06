@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+motor
+python-dotenv
+requests
+python-multipart
+pydantic
+pydantic-settings
+pymongo
+certifi
+cachetools
+uvloop
+sarvamai
+httpx
